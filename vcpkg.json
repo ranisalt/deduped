@@ -1,0 +1,24 @@
+{
+  "name": "deduped",
+  "version": "0.1.0",
+  "dependencies": [
+    "blake3",
+    "cli11",
+    {
+      "name": "spdlog",
+      "default-features": false
+    },
+    {
+      "name": "sqlite3",
+      "default-features": false
+    }
+  ],
+  "features": {
+    "tests": {
+      "description": "Dependencies needed only when BUILD_TESTING is enabled.",
+      "dependencies": [
+        "gtest"
+      ]
+    }
+  }
+}

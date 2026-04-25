@@ -1,0 +1,29 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+if [[ -z "${DEDUPED_CONFIG}" || -z "${DEDUPED_DATA}" ]]; then
+    echo "[svc-deduped] DEDUPED_CONFIG and DEDUPED_DATA must be set. Sleeping."
+    exec sleep infinity
+fi
+
+IFS=',' read -r -a RAW_DATA_ROOT_ARGS <<<"${DEDUPED_DATA}"
+DATA_ROOT_ARGS=()
+for raw_root in "${RAW_DATA_ROOT_ARGS[@]}"; do
+    root="${raw_root#"${raw_root%%[![:space:]]*}"}"
+    root="${root%"${root##*[![:space:]]}"}"
+    if [[ -n "${root}" ]]; then
+        DATA_ROOT_ARGS+=("${root}")
+    fi
+done
+
+if [[ "${#DATA_ROOT_ARGS[@]}" -eq 0 ]]; then
+    echo "[svc-deduped] DEDUPED_DATA must contain at least one root path. Sleeping."
+    exec sleep infinity
+fi
+
+DEDUPED_ARGS=(--config "${DEDUPED_CONFIG}" --apply)
+if [[ -n "${LOG_LEVEL}" ]]; then
+    DEDUPED_ARGS+=(--log-level "${LOG_LEVEL}")
+fi
+
+exec deduped "${DEDUPED_ARGS[@]}" "${DATA_ROOT_ARGS[@]}"

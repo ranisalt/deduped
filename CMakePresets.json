@@ -1,0 +1,51 @@
+{
+  "$schema": "https://cmake.org/cmake/help/v4.0/_downloads/3e2d73bff478d88a7de0de736ba5e361/schema.json",
+  "version": 10,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 1,
+    "patch": 3
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "description": "Configure with vcpkg toolchain and generate Ninja project files",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "BUILD_TESTING": "OFF",
+        "ENABLE_LTO": "ON",
+        "ENABLE_UNITY_BUILD": "ON"
+      }
+    },
+    {
+      "name": "with-tests",
+      "description": "Configure with tests enabled and test-only vcpkg dependencies",
+      "inherits": "default",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "VCPKG_MANIFEST_FEATURES": "tests"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "with-tests",
+      "configurePreset": "with-tests"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "with-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "configurePreset": "with-tests"
+    }
+  ]
+}

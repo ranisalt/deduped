@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  deduped:
+    image: deduped:latest
+    container_name: deduped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - UMASK=022
+      - DEDUPED_CONFIG=/config
+      - DEDUPED_DATA=/data
+      # Multiple roots: 'DEDUPED_DATA=/data,/another' and add a matching /another mount below
+      - LOG_LEVEL=info
+    volumes:
+      - ./config:/config
+      # Bind-mount your data directory here for deduplication
+      # Example: - /path/to/your/data:/data
+      - ./data:/data
+    restart: unless-stopped
+    # Optional: resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 512M
+
+volumes:
+  deduped-config:
+    driver: local
