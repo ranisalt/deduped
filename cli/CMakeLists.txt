@@ -1,9 +1,12 @@
+find_package(Boost REQUIRED COMPONENTS asio)
 find_package(CLI11 CONFIG REQUIRED)
 
 add_library(cli_impl cli_impl.cpp)
 target_link_libraries(cli_impl
     PUBLIC
         deduped_lib
+    PRIVATE
+        Boost::asio
 )
 
 add_executable(deduped-cli main.cpp)

@@ -7,6 +7,7 @@ add_library(deduped_lib STATIC
     watcher.cpp
 )
 
+find_package(Boost REQUIRED COMPONENTS asio container unordered)
 find_package(BLAKE3 CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
@@ -17,4 +18,8 @@ target_link_libraries(deduped_lib
         BLAKE3::blake3
         PkgConfig::sqlite3
         spdlog::spdlog
+    PRIVATE
+        Boost::asio
+        Boost::container
+        Boost::unordered
 )

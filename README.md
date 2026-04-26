@@ -210,11 +210,11 @@ docker buildx build --platform linux/amd64,linux/arm64 -t deduped:latest .
 ## Database schema
 
 Deduped stores:
-- **Files**: path, size, modification time, inode, device, mode, uid, gid
-- **Digests**: BLAKE3 hash and last-seen timestamp
+- **Inodes**: device+inode identity, metadata, BLAKE3 digest, and last-seen timestamp
+- **Path aliases**: path to inode mapping for each observed file path
 - **Operations**: planned and completed hardlink operations with timestamps
 
-Schema versioning allows future migrations without data loss.
+Current releases assume a fresh database schema at startup.
 
 ## Troubleshooting
 

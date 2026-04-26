@@ -194,6 +194,42 @@ TEST_F(EngineTest, ScanDecisionReportsHitAndMiss)
 	EXPECT_EQ(decisions.at(miss_path.string()), ScanCacheStatus::Miss);
 }
 
+TEST_F(EngineTest, SameInodeAliasesAreNotReportedAsDuplicates)
+{
+	const auto data_root = td.path() / "data";
+	fs::create_directories(data_root);
+	const auto canonical = td.write_file("data/canonical.txt", "same content");
+	const auto alias = data_root / "alias.txt";
+	fs::create_hard_link(canonical, alias);
+	ScanOptions alias_scan_opts;
+	alias_scan_opts.roots = {data_root};
+
+	EngineOptions opts;
+	opts.dry_run = true;
+
+	std::vector<DupePair> found;
+	std::size_t hit_count = 0;
+	std::size_t miss_count = 0;
+	EngineCallbacks cbs;
+	cbs.on_dupe_found = [&](const DupePair& pair) { found.push_back(pair); };
+	cbs.on_scan_decision = [&](const std::string&, const ScanCacheStatus status) {
+		if (status == ScanCacheStatus::Hit) {
+			++hit_count;
+		} else {
+			++miss_count;
+		}
+	};
+
+	const auto results = run_engine(*repo, alias_scan_opts, opts, cbs);
+
+	EXPECT_TRUE(found.empty());
+	EXPECT_TRUE(results.empty());
+	EXPECT_EQ(hit_count, 1u);
+	EXPECT_EQ(miss_count, 1u);
+	ASSERT_TRUE(repo->find_by_path(canonical.string()).has_value());
+	ASSERT_TRUE(repo->find_by_path(alias.string()).has_value());
+}
+
 TEST_F(EngineTest, InterruptedDryRunPersistsPartialIndex)
 {
 	const auto a = td.write_file("a.txt", "aaa");

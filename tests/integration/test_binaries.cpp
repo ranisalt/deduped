@@ -496,3 +496,43 @@ TEST(DaemonBinaryTest, ExistingLockDirPreventsStart)
 
 	EXPECT_NE(exit_code, 0);
 }
+
+TEST(DaemonBinaryTest, DryRunWatchModeDoesNotApplyHardlinks)
+{
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+
+	const auto canonical = td.write_file("root/a.txt", "same content");
+	const auto probe = root / "probe.txt";
+	const auto duplicate = root / "b.txt";
+
+	Repository observer(config / "deduped.db");
+	int exit_code = EXIT_FAILURE;
+	std::jthread daemon_thread([&] { exit_code = run_daemon_impl(config.string(), {root.string()}, "info", false); });
+
+	auto wait_for = [](auto&& ready) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (std::chrono::steady_clock::now() < deadline) {
+			if (ready()) {
+				return true;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	};
+
+	ASSERT_TRUE(wait_for([&] { return observer.find_by_path(canonical.string()).has_value(); }));
+	td.write_file("root/probe.txt", "unique");
+	ASSERT_TRUE(wait_for([&] { return observer.find_by_path(probe.string()).has_value(); }));
+	td.write_file("root/b.txt", "same content");
+	ASSERT_TRUE(wait_for([&] { return observer.find_by_path(duplicate.string()).has_value(); }));
+
+	EXPECT_NE(meta_from_path(canonical).inode, meta_from_path(duplicate).inode);
+
+	::raise(SIGINT);
+	daemon_thread.join();
+	EXPECT_EQ(exit_code, EXIT_SUCCESS);
+}

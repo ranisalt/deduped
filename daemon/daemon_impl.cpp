@@ -4,7 +4,11 @@
 #include "../lib/logging.hpp"
 #include "../lib/repository.hpp"
 #include "../lib/scanner.hpp"
+#include "../lib/scope_exit.hpp"
 #include "../lib/watcher.hpp"
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/signal_set.hpp>
 
 #include <chrono>
 #include <csignal>
@@ -12,7 +16,6 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
-#include <pthread.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string_view>
@@ -61,35 +64,6 @@ bool check_dir_access(const std::filesystem::path& dir, std::string_view label, 
 	}
 
 	return true;
-}
-
-sigset_t termination_signal_set()
-{
-	sigset_t set;
-	sigemptyset(&set);
-	sigaddset(&set, SIGINT);
-	sigaddset(&set, SIGTERM);
-	return set;
-}
-
-void block_termination_signals()
-{
-	const auto signal_set = termination_signal_set();
-	const int rc = ::pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
-	if (rc != 0) {
-		throw std::system_error(rc, std::generic_category(), "pthread_sigmask");
-	}
-}
-
-void start_signal_waiter(Watcher& watcher)
-{
-	const auto signal_set = termination_signal_set();
-	std::thread{[signal_set, &watcher]() mutable {
-		int signal_number = 0;
-		if (::sigwait(&signal_set, &signal_number) == 0) {
-			watcher.stop();
-		}
-	}}.detach();
 }
 
 class LockDir
@@ -241,24 +215,33 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 		else if (r.status == ApplyStatus::Failed)
 			spdlog::error("FAILED {}: {}", r.pair.duplicate_path, r.message);
 	};
+	EngineOptions watch_engine_opts;
+	watch_engine_opts.dry_run = !apply_flag;
 
 	try {
-		block_termination_signals();
 		Watcher watcher(data_roots, [&](const WatchEvent& ev) {
 			// Need repo and engine_opts for the callback - recreate them here
 			Repository repo{config_root / "deduped.db"};
-			EngineOptions engine_opts;
-			engine_opts.dry_run = false; // Apply mode during watch loop
 
 			if (ev.type == FileEvent::Modified) {
 				spdlog::debug("EVENT modified {}", ev.path.string());
-				handle_file_change(repo, ev.path, engine_opts, watch_cbs);
+				handle_file_change(repo, ev.path, watch_engine_opts, watch_cbs);
 			} else {
 				spdlog::debug("EVENT deleted {}", ev.path.string());
 				handle_file_removed(repo, ev.path);
 			}
 		});
-		start_signal_waiter(watcher);
+
+		boost::asio::io_context signal_context;
+		boost::asio::signal_set signals(signal_context, SIGINT, SIGTERM);
+		signals.async_wait([&](const boost::system::error_code& ec, int) {
+			if (!ec) {
+				watcher.stop();
+			}
+			signal_context.stop();
+		});
+		std::jthread signal_thread([&](std::stop_token) { signal_context.run(); });
+		auto stop_signal_context = scope_exit{[&] { signal_context.stop(); }};
 
 		watcher.run();
 

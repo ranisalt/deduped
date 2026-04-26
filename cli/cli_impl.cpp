@@ -6,60 +6,50 @@
 #include "../lib/scanner.hpp"
 #include "../lib/types.hpp"
 
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/signal_set.hpp>
+
 #include <algorithm>
-#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <atomic>
 #include <spdlog/spdlog.h>
-#include <system_error>
+#include <thread>
 
 namespace deduped {
 
 namespace {
 
-volatile std::sig_atomic_t g_termination_requested = 0;
-
-extern "C" void on_termination_signal(int) { g_termination_requested = 1; }
-
-class SignalHandlerGuard
+class SignalWatcher
 {
 public:
-	SignalHandlerGuard()
+	SignalWatcher() : signals_(io_context_, SIGINT, SIGTERM)
 	{
-		g_termination_requested = 0;
+		signals_.async_wait([this](const boost::system::error_code& ec, int) {
+			if (!ec) {
+				termination_requested_.store(true);
+			}
+			io_context_.stop();
+		});
 
-		struct sigaction action{};
-		action.sa_handler = on_termination_signal;
-		sigemptyset(&action.sa_mask);
-		action.sa_flags = 0;
-
-		if (::sigaction(SIGINT, &action, &old_sigint_) != 0) {
-			throw std::system_error(errno, std::generic_category(), "sigaction(SIGINT)");
-		}
-		if (::sigaction(SIGTERM, &action, &old_sigterm_) != 0) {
-			const int e = errno;
-			::sigaction(SIGINT, &old_sigint_, nullptr);
-			throw std::system_error(e, std::generic_category(), "sigaction(SIGTERM)");
-		}
-		installed_ = true;
+		thread_ = std::jthread([this](std::stop_token) { io_context_.run(); });
 	}
 
-	~SignalHandlerGuard()
+	~SignalWatcher()
 	{
-		if (!installed_) {
-			return;
-		}
-		::sigaction(SIGINT, &old_sigint_, nullptr);
-		::sigaction(SIGTERM, &old_sigterm_, nullptr);
+		boost::system::error_code ec;
+		signals_.cancel(ec);
+		io_context_.stop();
 	}
 
-	[[nodiscard]] bool termination_requested() const noexcept { return g_termination_requested != 0; }
+	[[nodiscard]] bool termination_requested() const noexcept { return termination_requested_.load(); }
 
 private:
-	struct sigaction old_sigint_{};
-	struct sigaction old_sigterm_{};
-	bool installed_{false};
+	std::atomic<bool> termination_requested_{false};
+	boost::asio::io_context io_context_;
+	boost::asio::signal_set signals_;
+	std::jthread thread_;
 };
 
 } // namespace
@@ -76,7 +66,7 @@ struct ScanCounters
 	std::size_t failed{0};
 };
 
-EngineCallbacks make_engine_callbacks(const SignalHandlerGuard& signal_handlers, ScanCounters& c)
+EngineCallbacks make_engine_callbacks(const SignalWatcher& signal_watcher, ScanCounters& c)
 {
 	constexpr std::size_t progress_interval = 1000;
 
@@ -101,7 +91,7 @@ EngineCallbacks make_engine_callbacks(const SignalHandlerGuard& signal_handlers,
 		spdlog::warn("Ctrl+C detected. Application is closing; {} hash jobs pending ({} in flight).", pending,
 		             in_flight);
 	};
-	cbs.should_abort = [&] { return signal_handlers.termination_requested(); };
+	cbs.should_abort = [&] { return signal_watcher.termination_requested(); };
 	cbs.on_dupe_found = [&](const DupePair& p) {
 		++c.dupes;
 		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
@@ -153,7 +143,7 @@ int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& root
 	const std::filesystem::path db_path = db_root / "deduped.db";
 	spdlog::info("Using database: {}", db_path.string());
 	Repository repo{db_path};
-	SignalHandlerGuard signal_handlers;
+	SignalWatcher signal_watcher;
 
 	ScanOptions scan_opts;
 	scan_opts.roots.reserve(roots.size());
@@ -164,7 +154,7 @@ int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& root
 	engine_opts.dry_run = !apply_flag;
 
 	ScanCounters counters;
-	const EngineCallbacks cbs = make_engine_callbacks(signal_handlers, counters);
+	const EngineCallbacks cbs = make_engine_callbacks(signal_watcher, counters);
 
 	EngineCallbacks recovery_cbs;
 	recovery_cbs.on_apply = [](const ApplyResult& r) {

@@ -7,9 +7,6 @@
 #include <optional>
 #include <vector>
 
-// Forward-declare sqlite3 so callers don't need sqlite3.h
-struct sqlite3;
-
 namespace deduped {
 
 // Repository owns the SQLite connection and executes all DB operations.
@@ -18,7 +15,7 @@ class Repository
 {
 public:
 	// Open (or create) the database at `db_path`.
-	// Applies the schema migration and enables WAL mode.
+	// Initializes schema objects and enables WAL mode.
 	explicit Repository(const std::filesystem::path& db_path);
 	~Repository();
 
@@ -33,6 +30,10 @@ public:
 
 	// Look up a file by its absolute path.  Returns nullopt if not found.
 	[[nodiscard]] std::optional<IndexEntry> find_by_path(const std::string& path) const;
+
+	// Look up a file identity by device+inode. Returns nullopt if not found.
+	// Path in the returned entry is one representative alias.
+	[[nodiscard]] std::optional<IndexEntry> find_by_inode(std::uint64_t device, std::uint64_t inode) const;
 
 	// Return all entries that share the given digest (for duplicate detection).
 	[[nodiscard]] std::vector<IndexEntry> find_by_digest(const Digest& digest) const;

@@ -2,8 +2,11 @@
   "name": "deduped",
   "version": "0.1.0",
   "dependencies": [
-    "asio",
     "blake3",
+    "boost-asio",
+    "boost-container",
+    "boost-container-hash",
+    "boost-unordered",
     "cli11",
     {
       "name": "spdlog",

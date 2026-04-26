@@ -262,3 +262,21 @@ TEST(WatcherTest, StopBeforeRunReturnsImmediately)
 
 	EXPECT_TRUE(finished);
 }
+
+TEST(WatcherTest, StopDuringRunReturnsPromptly)
+{
+	TempDir td;
+	Watcher w{td.path(), [](const WatchEvent&) {}};
+
+	bool finished = false;
+	std::thread t{[&] {
+		w.run();
+		finished = true;
+	}};
+
+	settle();
+	w.stop();
+	t.join();
+
+	EXPECT_TRUE(finished);
+}

@@ -15,13 +15,13 @@ protected:
 	TempDir td;
 	std::unique_ptr<Repository> repo;
 
-	static IndexEntry make_entry(const std::string& path, std::uint64_t size = 10)
+	static IndexEntry make_entry(const std::string& path, std::uint64_t size = 10, std::uint64_t inode = 42)
 	{
 		IndexEntry e;
 		e.path = path;
 		e.meta.size = size;
 		e.meta.mtime_ns = 1000000;
-		e.meta.inode = 42;
+		e.meta.inode = inode;
 		e.meta.device = 7;
 		e.meta.mode = 0644;
 		e.meta.uid = 1000;
@@ -59,16 +59,27 @@ TEST_F(RepositoryTest, FindByDigestReturnsAllMatches)
 {
 	Digest d;
 	d.fill(0xcd);
-	auto e1 = make_entry("/a");
+	auto e1 = make_entry("/a", 10, 101);
 	e1.digest = d;
-	auto e2 = make_entry("/b");
+	auto e2 = make_entry("/b", 10, 102);
 	e2.digest = d;
-	auto e3 = make_entry("/c");
+	auto e3 = make_entry("/c", 10, 103);
 	e3.digest = {}; // different digest
 
 	repo->upsert(e1);
 	repo->upsert(e2);
 	repo->upsert(e3);
+
+	const auto by_inode_101 = repo->find_by_inode(7, 101);
+	const auto by_inode_102 = repo->find_by_inode(7, 102);
+	const auto by_path_a = repo->find_by_path("/a");
+	const auto by_path_b = repo->find_by_path("/b");
+	ASSERT_TRUE(by_inode_101.has_value());
+	ASSERT_TRUE(by_inode_102.has_value());
+	ASSERT_TRUE(by_path_a.has_value());
+	ASSERT_TRUE(by_path_b.has_value());
+	EXPECT_EQ(by_inode_101->digest, d);
+	EXPECT_EQ(by_inode_102->digest, d);
 
 	const auto matches = repo->find_by_digest(d);
 	EXPECT_EQ(matches.size(), 2u);

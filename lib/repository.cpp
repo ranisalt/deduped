@@ -11,21 +11,31 @@ static constexpr const char* kSchema = R"sql(
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
-CREATE TABLE IF NOT EXISTS files (
-    id          INTEGER PRIMARY KEY,
-    path        TEXT    NOT NULL UNIQUE,
-    size        INTEGER NOT NULL,
-    mtime_ns    INTEGER NOT NULL,
-    inode       INTEGER NOT NULL,
-    device      INTEGER NOT NULL,
-    mode        INTEGER NOT NULL,
-    uid         INTEGER NOT NULL,
-    gid         INTEGER NOT NULL,
-    digest      BLOB    NOT NULL,   -- 32 bytes BLAKE3
-    last_seen   INTEGER NOT NULL    -- Unix seconds
+CREATE TABLE IF NOT EXISTS inodes (
+	id          INTEGER PRIMARY KEY,
+	device      INTEGER NOT NULL,
+	inode       INTEGER NOT NULL,
+	size        INTEGER NOT NULL,
+	mtime_ns    INTEGER NOT NULL,
+	mode        INTEGER NOT NULL,
+	uid         INTEGER NOT NULL,
+	gid         INTEGER NOT NULL,
+	digest      BLOB    NOT NULL,   -- 32 bytes BLAKE3
+	last_seen   INTEGER NOT NULL,   -- Unix seconds
+	UNIQUE(device, inode)
 );
 
-CREATE INDEX IF NOT EXISTS idx_files_digest ON files(digest);
+CREATE INDEX IF NOT EXISTS idx_inodes_digest ON inodes(digest);
+CREATE INDEX IF NOT EXISTS idx_inodes_identity ON inodes(device, inode);
+
+CREATE TABLE IF NOT EXISTS paths (
+	path        TEXT    PRIMARY KEY,
+	inode_id    INTEGER NOT NULL,
+	last_seen   INTEGER NOT NULL,
+	FOREIGN KEY(inode_id) REFERENCES inodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_paths_inode_id ON paths(inode_id);
 
 CREATE TABLE IF NOT EXISTS op_log (
     id          INTEGER PRIMARY KEY,
@@ -38,7 +48,7 @@ CREATE TABLE IF NOT EXISTS op_log (
 );
 )sql";
 
-static constexpr int kCurrentSchemaVersion = 2;
+static constexpr int kCurrentSchemaVersion = 3;
 
 constexpr const char* op_status_str(Repository::OpStatus s) noexcept
 {
@@ -67,12 +77,6 @@ struct Stmt
 	}
 	Stmt(const Stmt&) = delete;
 	Stmt& operator=(const Stmt&) = delete;
-
-	void reset()
-	{
-		sqlite3_reset(s);
-		sqlite3_clear_bindings(s);
-	}
 };
 
 struct Repository::Impl
@@ -107,42 +111,12 @@ struct Repository::Impl
 
 	void bootstrap_version()
 	{
-		ensure_backup_path_column();
 		set_user_version(kCurrentSchemaVersion);
-	}
-
-	[[nodiscard]] int user_version() const
-	{
-		Stmt st(db, "PRAGMA user_version;");
-		const int rc = sqlite3_step(st.s);
-		if (rc != SQLITE_ROW) {
-			throw std::runtime_error(std::string("PRAGMA user_version: ") + sqlite3_errmsg(db));
-		}
-		return sqlite3_column_int(st.s, 0);
 	}
 
 	void set_user_version(const int version)
 	{
 		exec(("PRAGMA user_version = " + std::to_string(version) + ";").c_str());
-	}
-
-	[[nodiscard]] bool table_has_column(const char* table_name, const char* column_name) const
-	{
-		Stmt st(db, ("PRAGMA table_info(" + std::string(table_name) + ");").c_str());
-		while (sqlite3_step(st.s) == SQLITE_ROW) {
-			const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 1));
-			if (value != nullptr && std::string_view{value} == column_name) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	void ensure_backup_path_column()
-	{
-		if (!table_has_column("op_log", "backup_path")) {
-			exec("ALTER TABLE op_log ADD COLUMN backup_path TEXT NOT NULL DEFAULT '';");
-		}
 	}
 
 	int step_expect_done(sqlite3_stmt* s)
@@ -200,6 +174,67 @@ struct Repository::Impl
 		}
 		return op;
 	}
+
+	[[nodiscard]] std::optional<std::int64_t> inode_id_for_path(const std::string& path) const
+	{
+		Stmt st(db, "SELECT inode_id FROM paths WHERE path=? LIMIT 1;");
+		sqlite3_bind_text(st.s, 1, path.c_str(), -1, SQLITE_TRANSIENT);
+		const int rc = sqlite3_step(st.s);
+		if (rc == SQLITE_ROW) {
+			return sqlite3_column_int64(st.s, 0);
+		}
+		if (rc == SQLITE_DONE) {
+			return std::nullopt;
+		}
+		throw std::runtime_error(std::string("inode_id_for_path: ") + sqlite3_errmsg(db));
+	}
+
+	[[nodiscard]] std::int64_t upsert_inode_and_get_id(const IndexEntry& entry)
+	{
+		static constexpr const char* kUpsertInodeSql = R"sql(
+INSERT INTO inodes(device, inode, size, mtime_ns, mode, uid, gid, digest, last_seen)
+VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(device, inode) DO UPDATE SET
+    size      = excluded.size,
+    mtime_ns  = excluded.mtime_ns,
+    mode      = excluded.mode,
+    uid       = excluded.uid,
+    gid       = excluded.gid,
+    digest    = excluded.digest,
+    last_seen = excluded.last_seen;
+)sql";
+
+		Stmt upsert_inode(db, kUpsertInodeSql);
+		sqlite3_bind_int64(upsert_inode.s, 1, static_cast<sqlite3_int64>(entry.meta.device));
+		sqlite3_bind_int64(upsert_inode.s, 2, static_cast<sqlite3_int64>(entry.meta.inode));
+		sqlite3_bind_int64(upsert_inode.s, 3, static_cast<sqlite3_int64>(entry.meta.size));
+		sqlite3_bind_int64(upsert_inode.s, 4, entry.meta.mtime_ns);
+		sqlite3_bind_int64(upsert_inode.s, 5, static_cast<sqlite3_int64>(entry.meta.mode));
+		sqlite3_bind_int64(upsert_inode.s, 6, static_cast<sqlite3_int64>(entry.meta.uid));
+		sqlite3_bind_int64(upsert_inode.s, 7, static_cast<sqlite3_int64>(entry.meta.gid));
+		sqlite3_bind_blob(upsert_inode.s, 8, entry.digest.data(), static_cast<int>(kDigestBytes), SQLITE_TRANSIENT);
+		sqlite3_bind_int64(upsert_inode.s, 9, entry.last_seen);
+		step_expect_done(upsert_inode.s);
+
+		Stmt inode_id_stmt(db, "SELECT id FROM inodes WHERE device=? AND inode=? LIMIT 1;");
+		sqlite3_bind_int64(inode_id_stmt.s, 1, static_cast<sqlite3_int64>(entry.meta.device));
+		sqlite3_bind_int64(inode_id_stmt.s, 2, static_cast<sqlite3_int64>(entry.meta.inode));
+		const int rc = sqlite3_step(inode_id_stmt.s);
+		if (rc != SQLITE_ROW) {
+			throw std::runtime_error(std::string("upsert_inode_and_get_id: ") + sqlite3_errmsg(db));
+		}
+		return sqlite3_column_int64(inode_id_stmt.s, 0);
+	}
+
+	void maybe_delete_orphan_inode(const std::int64_t inode_id)
+	{
+		Stmt st(db,
+		        "DELETE FROM inodes WHERE id=? "
+		        "AND NOT EXISTS(SELECT 1 FROM paths WHERE inode_id=? LIMIT 1);");
+		sqlite3_bind_int64(st.s, 1, inode_id);
+		sqlite3_bind_int64(st.s, 2, inode_id);
+		step_expect_done(st.s);
+	}
 };
 
 Repository::Repository(const std::filesystem::path& db_path) : impl_(std::make_unique<Impl>(db_path)) {}
@@ -208,40 +243,36 @@ Repository::~Repository() = default;
 
 void Repository::upsert(const IndexEntry& entry)
 {
-	static constexpr const char* kSql = R"sql(
-        INSERT INTO files(path, size, mtime_ns, inode, device, mode, uid, gid, digest, last_seen)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(path) DO UPDATE SET
-            size      = excluded.size,
-            mtime_ns  = excluded.mtime_ns,
-            inode     = excluded.inode,
-            device    = excluded.device,
-            mode      = excluded.mode,
-            uid       = excluded.uid,
-            gid       = excluded.gid,
-            digest    = excluded.digest,
-            last_seen = excluded.last_seen;
-    )sql";
+	impl_->exec("BEGIN IMMEDIATE TRANSACTION;");
+	try {
+		const auto previous_inode_id = impl_->inode_id_for_path(entry.path);
+		const auto inode_id = impl_->upsert_inode_and_get_id(entry);
 
-	Stmt st(impl_->db, kSql);
-	sqlite3_bind_text(st.s, 1, entry.path.c_str(), -1, SQLITE_TRANSIENT);
-	sqlite3_bind_int64(st.s, 2, static_cast<sqlite3_int64>(entry.meta.size));
-	sqlite3_bind_int64(st.s, 3, entry.meta.mtime_ns);
-	sqlite3_bind_int64(st.s, 4, static_cast<sqlite3_int64>(entry.meta.inode));
-	sqlite3_bind_int64(st.s, 5, static_cast<sqlite3_int64>(entry.meta.device));
-	sqlite3_bind_int64(st.s, 6, static_cast<sqlite3_int64>(entry.meta.mode));
-	sqlite3_bind_int64(st.s, 7, static_cast<sqlite3_int64>(entry.meta.uid));
-	sqlite3_bind_int64(st.s, 8, static_cast<sqlite3_int64>(entry.meta.gid));
-	sqlite3_bind_blob(st.s, 9, entry.digest.data(), static_cast<int>(kDigestBytes), SQLITE_TRANSIENT);
-	sqlite3_bind_int64(st.s, 10, entry.last_seen);
-	impl_->step_expect_done(st.s);
+		Stmt upsert_path(impl_->db,
+		                 "INSERT INTO paths(path, inode_id, last_seen) VALUES(?,?,?) "
+		                 "ON CONFLICT(path) DO UPDATE SET inode_id=excluded.inode_id, last_seen=excluded.last_seen;");
+		sqlite3_bind_text(upsert_path.s, 1, entry.path.c_str(), -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int64(upsert_path.s, 2, inode_id);
+		sqlite3_bind_int64(upsert_path.s, 3, entry.last_seen);
+		impl_->step_expect_done(upsert_path.s);
+
+		if (previous_inode_id.has_value() && *previous_inode_id != inode_id) {
+			impl_->maybe_delete_orphan_inode(*previous_inode_id);
+		}
+
+		impl_->exec("COMMIT;");
+	} catch (...) {
+		impl_->exec("ROLLBACK;");
+		throw;
+	}
 }
 
 std::optional<IndexEntry> Repository::find_by_path(const std::string& path) const
 {
 	static constexpr const char* kSql =
-	    "SELECT id,path,size,mtime_ns,inode,device,mode,uid,gid,digest,last_seen "
-	    "FROM files WHERE path=? LIMIT 1;";
+	    "SELECT i.id,p.path,i.size,i.mtime_ns,i.inode,i.device,i.mode,i.uid,i.gid,i.digest,p.last_seen "
+	    "FROM paths p JOIN inodes i ON i.id=p.inode_id "
+	    "WHERE p.path=? LIMIT 1;";
 
 	Stmt st(impl_->db, kSql);
 	sqlite3_bind_text(st.s, 1, path.c_str(), -1, SQLITE_TRANSIENT);
@@ -255,11 +286,33 @@ std::optional<IndexEntry> Repository::find_by_path(const std::string& path) cons
 	throw std::runtime_error(std::string("find_by_path: ") + sqlite3_errmsg(impl_->db));
 }
 
+std::optional<IndexEntry> Repository::find_by_inode(const std::uint64_t device, const std::uint64_t inode) const
+{
+	static constexpr const char* kSql =
+	    "SELECT i.id, "
+	    "COALESCE((SELECT p.path FROM paths p WHERE p.inode_id=i.id ORDER BY p.path LIMIT 1), ''), "
+	    "i.size,i.mtime_ns,i.inode,i.device,i.mode,i.uid,i.gid,i.digest,i.last_seen "
+	    "FROM inodes i WHERE i.device=? AND i.inode=? LIMIT 1;";
+
+	Stmt st(impl_->db, kSql);
+	sqlite3_bind_int64(st.s, 1, static_cast<sqlite3_int64>(device));
+	sqlite3_bind_int64(st.s, 2, static_cast<sqlite3_int64>(inode));
+	const int rc = sqlite3_step(st.s);
+	if (rc == SQLITE_ROW) {
+		return Impl::entry_from_row(st.s);
+	}
+	if (rc == SQLITE_DONE) {
+		return std::nullopt;
+	}
+	throw std::runtime_error(std::string("find_by_inode: ") + sqlite3_errmsg(impl_->db));
+}
+
 std::vector<IndexEntry> Repository::find_by_digest(const Digest& digest) const
 {
 	static constexpr const char* kSql =
-	    "SELECT id,path,size,mtime_ns,inode,device,mode,uid,gid,digest,last_seen "
-	    "FROM files WHERE digest=? ORDER BY path;";
+	    "SELECT i.id,p.path,i.size,i.mtime_ns,i.inode,i.device,i.mode,i.uid,i.gid,i.digest,p.last_seen "
+	    "FROM inodes i JOIN paths p ON p.inode_id=i.id "
+	    "WHERE i.digest=? ORDER BY p.path;";
 
 	Stmt st(impl_->db, kSql);
 	sqlite3_bind_blob(st.s, 1, digest.data(), static_cast<int>(kDigestBytes), SQLITE_TRANSIENT);
@@ -280,16 +333,41 @@ std::vector<IndexEntry> Repository::find_by_digest(const Digest& digest) const
 
 void Repository::remove_stale(std::int64_t cutoff_unix_s)
 {
-	Stmt st(impl_->db, "DELETE FROM files WHERE last_seen < ?;");
-	sqlite3_bind_int64(st.s, 1, cutoff_unix_s);
-	impl_->step_expect_done(st.s);
+	impl_->exec("BEGIN IMMEDIATE TRANSACTION;");
+	try {
+		Stmt stale_paths(impl_->db, "DELETE FROM paths WHERE last_seen < ?;");
+		sqlite3_bind_int64(stale_paths.s, 1, cutoff_unix_s);
+		impl_->step_expect_done(stale_paths.s);
+
+		Stmt prune_orphans(impl_->db,
+		                   "DELETE FROM inodes WHERE NOT EXISTS(SELECT 1 FROM paths WHERE paths.inode_id=inodes.id);");
+		impl_->step_expect_done(prune_orphans.s);
+
+		impl_->exec("COMMIT;");
+	} catch (...) {
+		impl_->exec("ROLLBACK;");
+		throw;
+	}
 }
 
 void Repository::remove_by_path(const std::string& path)
 {
-	Stmt st(impl_->db, "DELETE FROM files WHERE path=?;");
-	sqlite3_bind_text(st.s, 1, path.c_str(), -1, SQLITE_TRANSIENT);
-	impl_->step_expect_done(st.s);
+	impl_->exec("BEGIN IMMEDIATE TRANSACTION;");
+	try {
+		const auto inode_id = impl_->inode_id_for_path(path);
+		Stmt delete_path(impl_->db, "DELETE FROM paths WHERE path=?;");
+		sqlite3_bind_text(delete_path.s, 1, path.c_str(), -1, SQLITE_TRANSIENT);
+		impl_->step_expect_done(delete_path.s);
+
+		if (inode_id.has_value()) {
+			impl_->maybe_delete_orphan_inode(*inode_id);
+		}
+
+		impl_->exec("COMMIT;");
+	} catch (...) {
+		impl_->exec("ROLLBACK;");
+		throw;
+	}
 }
 
 std::int64_t Repository::log_op_planned(const std::string& canonical, const std::string& duplicate,
