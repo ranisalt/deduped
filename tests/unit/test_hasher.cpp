@@ -43,4 +43,26 @@ TEST(HashFile, SameContentSameDigest)
 	EXPECT_EQ(hash_file(p1), hash_file(p2));
 }
 
-TEST(HashFile, ThrowsOnMissingFile) { EXPECT_THROW(hash_file("/nonexistent/path/file.txt"), std::system_error); }
+TEST(HashFile, ThrowsWhenAbortRequested)
+{
+	TempDir td;
+	const auto p = td.write_file("large.txt", std::string(2 * 1024 * 1024, 'x'));
+
+	std::size_t polls = 0;
+	EXPECT_THROW(
+	    {
+		    const auto ignored = hash_file(p, [&] { return polls++ > 0; });
+		    static_cast<void>(ignored);
+	    },
+	    HashInterrupted);
+}
+
+TEST(HashFile, ThrowsOnMissingFile)
+{
+	EXPECT_THROW(
+	    {
+		    const auto ignored = hash_file("/nonexistent/path/file.txt");
+		    static_cast<void>(ignored);
+	    },
+	    std::system_error);
+}

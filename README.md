@@ -5,7 +5,7 @@ A C++ daemon and CLI tool that identifies duplicate files and replaces them with
 ## Features
 
 - **BLAKE3-based content hashing** with cached digest validation
-- **Metadata-aware caching**: Hashes reused only if file size, mtime, inode, device, and permissions are unchanged
+- **Metadata-aware caching**: Hashes reused only if file size and mtime are unchanged
 - **Hardlink deduplication**: Confirmed duplicates replaced with hardlinks to reduce storage footprint
 - **Race condition hardening**: Safe against concurrent file mutations; digests validated at hardlink time
 - **Atomic lock mechanism**: Single-instance daemon enforcement via atomic directory creation

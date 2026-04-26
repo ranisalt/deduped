@@ -6,11 +6,128 @@
 #include "../lib/scanner.hpp"
 #include "../lib/types.hpp"
 
+#include <algorithm>
+#include <cerrno>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <spdlog/spdlog.h>
+#include <system_error>
 
 namespace deduped {
+
+namespace {
+
+volatile std::sig_atomic_t g_termination_requested = 0;
+
+extern "C" void on_termination_signal(int) { g_termination_requested = 1; }
+
+class SignalHandlerGuard
+{
+public:
+	SignalHandlerGuard()
+	{
+		g_termination_requested = 0;
+
+		struct sigaction action{};
+		action.sa_handler = on_termination_signal;
+		sigemptyset(&action.sa_mask);
+		action.sa_flags = 0;
+
+		if (::sigaction(SIGINT, &action, &old_sigint_) != 0) {
+			throw std::system_error(errno, std::generic_category(), "sigaction(SIGINT)");
+		}
+		if (::sigaction(SIGTERM, &action, &old_sigterm_) != 0) {
+			const int e = errno;
+			::sigaction(SIGINT, &old_sigint_, nullptr);
+			throw std::system_error(e, std::generic_category(), "sigaction(SIGTERM)");
+		}
+		installed_ = true;
+	}
+
+	~SignalHandlerGuard()
+	{
+		if (!installed_) {
+			return;
+		}
+		::sigaction(SIGINT, &old_sigint_, nullptr);
+		::sigaction(SIGTERM, &old_sigterm_, nullptr);
+	}
+
+	[[nodiscard]] bool termination_requested() const noexcept { return g_termination_requested != 0; }
+
+private:
+	struct sigaction old_sigint_{};
+	struct sigaction old_sigterm_{};
+	bool installed_{false};
+};
+
+} // namespace
+
+namespace {
+
+struct ScanCounters
+{
+	std::size_t scanned{0};
+	std::size_t hits{0};
+	std::size_t misses{0};
+	std::size_t dupes{0};
+	std::size_t linked{0};
+	std::size_t failed{0};
+};
+
+EngineCallbacks make_engine_callbacks(const SignalHandlerGuard& signal_handlers, ScanCounters& c)
+{
+	constexpr std::size_t progress_interval = 1000;
+
+	EngineCallbacks cbs;
+	cbs.on_scan_decision = [&](const std::string& path, const ScanCacheStatus status) {
+		++c.scanned;
+		switch (status) {
+			case ScanCacheStatus::Hit:
+				++c.hits;
+				break;
+			case ScanCacheStatus::Miss:
+				++c.misses;
+				break;
+		}
+		spdlog::trace("{} {}", status == ScanCacheStatus::Hit ? "HIT" : "MISS", path);
+		if (c.scanned % progress_interval == 0) {
+			spdlog::info("Progress: scanned={} hits={} misses={} dupes={} linked={} failed={}", c.scanned, c.hits,
+			             c.misses, c.dupes, c.linked, c.failed);
+		}
+	};
+	cbs.on_shutdown_requested = [](const std::size_t pending, const std::size_t in_flight) {
+		spdlog::warn("Ctrl+C detected. Application is closing; {} hash jobs pending ({} in flight).", pending,
+		             in_flight);
+	};
+	cbs.should_abort = [&] { return signal_handlers.termination_requested(); };
+	cbs.on_dupe_found = [&](const DupePair& p) {
+		++c.dupes;
+		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
+	};
+	cbs.on_apply = [&](const ApplyResult& r) {
+		switch (r.status) {
+			case ApplyStatus::Linked:
+				++c.linked;
+				spdlog::info("LINKED {}", r.pair.duplicate_path);
+				break;
+			case ApplyStatus::AlreadyLinked:
+				spdlog::debug("ALREADY_LINKED {}", r.pair.duplicate_path);
+				break;
+			case ApplyStatus::Skipped:
+				spdlog::debug("SKIPPED {}, {}", r.pair.duplicate_path, r.message);
+				break;
+			case ApplyStatus::Failed:
+				++c.failed;
+				spdlog::error("FAILED {}, {}", r.pair.duplicate_path, r.message);
+				break;
+		}
+	};
+	return cbs;
+}
+
+} // namespace
 
 int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& roots, const std::string& log_level,
                  bool apply_flag)
@@ -25,43 +142,29 @@ int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& root
 		spdlog::info("Running in dry-run mode (no filesystem changes).");
 	}
 
-	const std::filesystem::path db_path = std::filesystem::absolute(db_dir) / "deduped.db";
+	const std::filesystem::path db_root = std::filesystem::absolute(db_dir);
+	std::error_code mkdir_ec;
+	std::filesystem::create_directories(db_root, mkdir_ec);
+	if (mkdir_ec) {
+		spdlog::error("Failed to create database directory {}: {}", db_root.string(), mkdir_ec.message());
+		return EXIT_FAILURE;
+	}
+
+	const std::filesystem::path db_path = db_root / "deduped.db";
+	spdlog::info("Using database: {}", db_path.string());
 	Repository repo{db_path};
+	SignalHandlerGuard signal_handlers;
 
 	ScanOptions scan_opts;
 	scan_opts.roots.reserve(roots.size());
-	std::ranges::transform(roots, std::back_inserter(scan_opts.roots),
-	                       [](const std::string& root) { return std::filesystem::absolute(root); });
+	std::transform(roots.begin(), roots.end(), std::back_inserter(scan_opts.roots),
+	               [](const std::string& root) { return std::filesystem::absolute(root); });
 
 	EngineOptions engine_opts;
 	engine_opts.dry_run = !apply_flag;
 
-	std::size_t scanned{0}, dupes{0}, linked{0}, failed{0};
-
-	EngineCallbacks cbs;
-	cbs.on_scan = [&](const std::string&) { ++scanned; };
-	cbs.on_dupe_found = [&](const DupePair& p) {
-		++dupes;
-		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
-	};
-	cbs.on_apply = [&](const ApplyResult& r) {
-		switch (r.status) {
-			case ApplyStatus::Linked:
-				++linked;
-				spdlog::info("LINKED {}", r.pair.duplicate_path);
-				break;
-			case ApplyStatus::AlreadyLinked:
-				spdlog::debug("ALREADY_LINKED {}", r.pair.duplicate_path);
-				break;
-			case ApplyStatus::Skipped:
-				spdlog::debug("SKIPPED {}, {}", r.pair.duplicate_path, r.message);
-				break;
-			case ApplyStatus::Failed:
-				++failed;
-				spdlog::error("FAILED {}, {}", r.pair.duplicate_path, r.message);
-				break;
-		}
-	};
+	ScanCounters counters;
+	const EngineCallbacks cbs = make_engine_callbacks(signal_handlers, counters);
 
 	EngineCallbacks recovery_cbs;
 	recovery_cbs.on_apply = [](const ApplyResult& r) {
@@ -75,13 +178,19 @@ int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& root
 
 	try {
 		run_engine(repo, scan_opts, engine_opts, cbs);
+	} catch (const ScanInterrupted&) {
+		spdlog::info("Done. Scanned={} Hits={} Misses={} Dupes={} Linked={} Failed={}", counters.scanned, counters.hits,
+		             counters.misses, counters.dupes, counters.linked, counters.failed);
+		spdlog::warn("Interrupted by signal; saved indexed progress to {}", db_path.string());
+		return 130;
 	} catch (const std::exception& ex) {
 		spdlog::error("Engine error: {}", ex.what());
 		return EXIT_FAILURE;
 	}
 
-	spdlog::info("Done. Scanned={} Dupes={} Linked={} Failed={}", scanned, dupes, linked, failed);
-	return failed > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+	spdlog::info("Done. Scanned={} Hits={} Misses={} Dupes={} Linked={} Failed={}", counters.scanned, counters.hits,
+	             counters.misses, counters.dupes, counters.linked, counters.failed);
+	return counters.failed > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 } // namespace deduped

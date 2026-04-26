@@ -2,6 +2,7 @@
   "name": "deduped",
   "version": "0.1.0",
   "dependencies": [
+    "asio",
     "blake3",
     "cli11",
     {

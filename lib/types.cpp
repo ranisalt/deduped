@@ -22,8 +22,7 @@ std::string digest_to_hex(const Digest& d)
 bool is_meta_stale(const FileMeta& stored, const FileMeta& current) noexcept
 {
 	return stored.size != current.size || stored.mtime_ns != current.mtime_ns || stored.inode != current.inode ||
-	       stored.device != current.device || stored.mode != current.mode || stored.uid != current.uid ||
-	       stored.gid != current.gid;
+	       stored.device != current.device;
 }
 
 FileMeta meta_from_path(const std::filesystem::path& p)

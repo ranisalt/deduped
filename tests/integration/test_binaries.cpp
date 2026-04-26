@@ -1,15 +1,22 @@
 #include "../../cli/cli_impl.hpp"
 #include "../../daemon/daemon_impl.hpp"
 #include "../../lib/repository.hpp"
+#include "../../lib/scope_exit.hpp"
 #include "../../lib/types.hpp"
-#include "../helpers/scope_exit.hpp"
 #include "../helpers/temp_dir.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <spdlog/logger.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -27,9 +34,128 @@ void skip_if_running_as_root_for_binary_tests()
 	}
 }
 
-
 } // namespace
 
+TEST(CliBinaryTest, InterruptLogsClosingMessageWithPendingHashJobs)
+{
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+
+	const auto worker_count = std::max(1u, std::thread::hardware_concurrency());
+	const auto job_count = worker_count + 8;
+	const std::string payload(1024 * 1024, 'z');
+	std::vector<fs::path> file_paths;
+	file_paths.reserve(job_count);
+	for (unsigned int i = 0; i < job_count; ++i) {
+		file_paths.push_back(td.write_file("root/file-" + std::to_string(i) + ".bin", payload));
+	}
+
+	Repository observer(config / "deduped.db");
+
+	std::ostringstream captured_logs;
+	auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured_logs);
+	auto logger = std::make_shared<spdlog::logger>("test-cli-shutdown", sink);
+	auto previous_logger = spdlog::default_logger();
+	const auto previous_level = spdlog::default_logger()->level();
+	spdlog::set_default_logger(logger);
+	spdlog::set_level(spdlog::level::info);
+
+	const auto restore_logger = scope_exit{[&] {
+		spdlog::set_default_logger(previous_logger);
+		spdlog::set_level(previous_level);
+	}};
+
+	std::atomic<bool> interrupted = false;
+	std::jthread interrupter([&](std::stop_token stop_token) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (!stop_token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+			for (const auto& path : file_paths) {
+				if (observer.find_by_path(path.string()).has_value()) {
+					interrupted = true;
+					::raise(SIGINT);
+					return;
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+	});
+
+	const int exit_code = run_cli_impl(config.string(), {root.string()}, "info", false);
+
+	EXPECT_EQ(exit_code, 130);
+	EXPECT_TRUE(interrupted.load());
+	const auto logs = captured_logs.str();
+	EXPECT_NE(logs.find("Application is closing"), std::string::npos);
+	EXPECT_NE(logs.find("hash jobs pending"), std::string::npos);
+	EXPECT_NE(logs.find("Done. Scanned="), std::string::npos);
+}
+
+TEST(CliBinaryTest, ProgressLogsHitAndMissTotals)
+{
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+
+	for (int i = 0; i < 1000; ++i) {
+		td.write_file("root/file-" + std::to_string(i) + ".txt", "content-" + std::to_string(i));
+	}
+
+	std::ostringstream first_run_logs;
+	auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(first_run_logs);
+	auto logger = std::make_shared<spdlog::logger>("test-cli-progress", sink);
+	auto previous_logger = spdlog::default_logger();
+	const auto previous_level = spdlog::default_logger()->level();
+	spdlog::set_default_logger(logger);
+	spdlog::set_level(spdlog::level::info);
+
+	const auto restore_logger = scope_exit{[&] {
+		spdlog::set_default_logger(previous_logger);
+		spdlog::set_level(previous_level);
+	}};
+
+	EXPECT_EQ(run_cli_impl(config.string(), {root.string()}, "info", false), 0);
+	EXPECT_NE(first_run_logs.str().find("Progress: scanned=1000 hits=0 misses=1000"), std::string::npos);
+	EXPECT_NE(first_run_logs.str().find("Done. Scanned=1000 Hits=0 Misses=1000 Dupes=0 Linked=0 Failed=0"),
+	          std::string::npos);
+
+	first_run_logs.str("");
+	first_run_logs.clear();
+
+	EXPECT_EQ(run_cli_impl(config.string(), {root.string()}, "info", false), 0);
+	EXPECT_NE(first_run_logs.str().find("Progress: scanned=1000 hits=1000 misses=0"), std::string::npos);
+	EXPECT_NE(first_run_logs.str().find("Done. Scanned=1000 Hits=1000 Misses=0 Dupes=0 Linked=0 Failed=0"),
+	          std::string::npos);
+}
+
+TEST(CliBinaryTest, PersistsIndexEntriesBetweenRuns)
+{
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+
+	const auto p1 = td.write_file("root/file-1.txt", "content-1");
+	const auto p2 = td.write_file("root/file-2.txt", "content-2");
+	const auto p3 = td.write_file("root/file-3.txt", "content-3");
+
+	EXPECT_EQ(run_cli_impl(config.string(), {root.string()}, "info", false), 0);
+
+	Repository repo(config / "deduped.db");
+	EXPECT_TRUE(repo.find_by_path(p1.string()).has_value());
+	EXPECT_TRUE(repo.find_by_path(p2.string()).has_value());
+	EXPECT_TRUE(repo.find_by_path(p3.string()).has_value());
+
+	EXPECT_EQ(run_cli_impl(config.string(), {root.string()}, "info", false), 0);
+	EXPECT_TRUE(repo.find_by_path(p1.string()).has_value());
+	EXPECT_TRUE(repo.find_by_path(p2.string()).has_value());
+	EXPECT_TRUE(repo.find_by_path(p3.string()).has_value());
+}
 
 TEST(CliBinaryTest, ApplyCreatesHardlinksAcrossMultipleRoots)
 {
@@ -345,7 +471,6 @@ TEST(DaemonBinaryTest, UnreadableRootFailsFast)
 	EXPECT_NE(exit_code, 0);
 }
 
-
 TEST(DaemonBinaryTest, MissingConfigDirectoryFails)
 {
 	TempDir td;
@@ -357,7 +482,6 @@ TEST(DaemonBinaryTest, MissingConfigDirectoryFails)
 
 	EXPECT_NE(exit_code, 0);
 }
-
 
 TEST(DaemonBinaryTest, ExistingLockDirPreventsStart)
 {

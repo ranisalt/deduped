@@ -1,7 +1,7 @@
 #include "../../lib/engine.hpp"
 #include "../../lib/repository.hpp"
+#include "../../lib/scope_exit.hpp"
 #include "../../lib/types.hpp"
-#include "../helpers/scope_exit.hpp"
 #include "../helpers/temp_dir.hpp"
 
 #include <fstream>
@@ -11,10 +11,6 @@
 using namespace deduped;
 using namespace deduped::test;
 namespace fs = std::filesystem;
-
-namespace {
-
-} // namespace
 
 class ApplyHardlinkTest : public ::testing::Test
 {

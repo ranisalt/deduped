@@ -28,7 +28,15 @@ TEST(MetaFromPath, SizeMatchesFileContent)
 	EXPECT_EQ(meta_from_path(p).size, 1234u);
 }
 
-TEST(MetaFromPath, ThrowsOnMissingFile) { EXPECT_THROW(meta_from_path("/does/not/exist"), std::system_error); }
+TEST(MetaFromPath, ThrowsOnMissingFile)
+{
+	EXPECT_THROW(
+	    {
+		    const auto ignored = meta_from_path("/does/not/exist");
+		    static_cast<void>(ignored);
+	    },
+	    std::system_error);
+}
 
 TEST(IsMetaStaleLive, DetectsMtimeChange)
 {

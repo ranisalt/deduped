@@ -71,26 +71,26 @@ TEST(IsMetaStale, DeviceChangeMakesStale)
 	EXPECT_TRUE(is_meta_stale(stored, current));
 }
 
-TEST(IsMetaStale, ModeChangeMakesStale)
+TEST(IsMetaStale, ModeChangeDoesNotMakeStale)
 {
 	FileMeta stored, current;
 	stored.mode = 0644;
 	current.mode = 0600;
-	EXPECT_TRUE(is_meta_stale(stored, current));
+	EXPECT_FALSE(is_meta_stale(stored, current));
 }
 
-TEST(IsMetaStale, UidChangeMakesStale)
+TEST(IsMetaStale, UidChangeDoesNotMakeStale)
 {
 	FileMeta stored, current;
 	stored.uid = 1000;
 	current.uid = 0;
-	EXPECT_TRUE(is_meta_stale(stored, current));
+	EXPECT_FALSE(is_meta_stale(stored, current));
 }
 
-TEST(IsMetaStale, GidChangeMakesStale)
+TEST(IsMetaStale, GidChangeDoesNotMakeStale)
 {
 	FileMeta stored, current;
 	stored.gid = 1000;
 	current.gid = 0;
-	EXPECT_TRUE(is_meta_stale(stored, current));
+	EXPECT_FALSE(is_meta_stale(stored, current));
 }

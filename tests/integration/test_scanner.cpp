@@ -1,5 +1,5 @@
 #include "../../lib/scanner.hpp"
-#include "../helpers/scope_exit.hpp"
+#include "../../lib/scope_exit.hpp"
 #include "../helpers/temp_dir.hpp"
 
 #include <algorithm>

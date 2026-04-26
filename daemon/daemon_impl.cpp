@@ -122,7 +122,7 @@ private:
 } // namespace
 
 int init_daemon_without_watcher(const std::string& config_dir, const std::vector<std::string>& data_dirs,
-                                 const std::string& log_level, bool apply_flag)
+                                const std::string& log_level, bool apply_flag)
 {
 	if (!configure_log_level(log_level)) {
 		return EXIT_FAILURE;
@@ -248,7 +248,7 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 			// Need repo and engine_opts for the callback - recreate them here
 			Repository repo{config_root / "deduped.db"};
 			EngineOptions engine_opts;
-			engine_opts.dry_run = false;  // Apply mode during watch loop
+			engine_opts.dry_run = false; // Apply mode during watch loop
 
 			if (ev.type == FileEvent::Modified) {
 				spdlog::debug("EVENT modified {}", ev.path.string());

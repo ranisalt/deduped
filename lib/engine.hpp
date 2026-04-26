@@ -4,8 +4,10 @@
 #include "scanner.hpp"
 #include "types.hpp"
 
+#include <cstddef>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace deduped {
@@ -15,16 +17,40 @@ struct EngineOptions
 	bool dry_run{true}; // true = report only; false = create hardlinks
 };
 
+class ScanInterrupted : public std::runtime_error
+{
+public:
+	ScanInterrupted() : std::runtime_error("scan interrupted") {}
+
+	ScanInterrupted(const std::size_t pending_hash_jobs, const std::size_t in_flight_hash_jobs) :
+	    std::runtime_error("scan interrupted"),
+	    pending_hash_jobs_(pending_hash_jobs),
+	    in_flight_hash_jobs_(in_flight_hash_jobs)
+	{}
+
+	[[nodiscard]] std::size_t pending_hash_jobs() const noexcept { return pending_hash_jobs_; }
+	[[nodiscard]] std::size_t in_flight_hash_jobs() const noexcept { return in_flight_hash_jobs_; }
+
+private:
+	std::size_t pending_hash_jobs_{0};
+	std::size_t in_flight_hash_jobs_{0};
+};
+
 // Callback types for progress reporting.
-using ProgressFn = std::function<void(const std::string& path)>; // called per file scanned
-using DupeFoundFn = std::function<void(const DupePair&)>;        // called when a pair is identified
-using ApplyResultFn = std::function<void(const ApplyResult&)>;   // called after each apply attempt
+enum class ScanCacheStatus
+{
+	Hit,
+	Miss,
+};
 
 struct EngineCallbacks
 {
-	ProgressFn on_scan;        // may be nullptr
-	DupeFoundFn on_dupe_found; // may be nullptr
-	ApplyResultFn on_apply;    // may be nullptr
+	std::function<void(const std::string& path)> on_scan;                                            // may be nullptr
+	std::function<void(const std::string& path, ScanCacheStatus status)> on_scan_decision;           // may be nullptr
+	std::function<void(const DupePair&)> on_dupe_found;                                              // may be nullptr
+	std::function<void(const ApplyResult&)> on_apply;                                                // may be nullptr
+	std::function<void(std::size_t pending_jobs, std::size_t in_flight_jobs)> on_shutdown_requested; // may be nullptr
+	std::function<bool()> should_abort; // may be nullptr; return true to stop
 };
 
 namespace detail {
