@@ -232,43 +232,50 @@ TEST_F(EngineTest, SameInodeAliasesAreNotReportedAsDuplicates)
 
 TEST_F(EngineTest, InterruptedDryRunPersistsPartialIndex)
 {
-	const auto a = td.write_file("a.txt", "aaa");
-	const auto b = td.write_file("b.txt", "bbb");
+	const auto worker_count = std::max(1u, std::thread::hardware_concurrency());
+	const auto job_count = worker_count + 8;
+	std::vector<fs::path> file_paths;
+	file_paths.reserve(job_count);
+	for (unsigned int i = 0; i < job_count; ++i) {
+		file_paths.push_back(
+		    td.write_file("file-" + std::to_string(i) + ".bin", std::string(1024 * 1024, static_cast<char>('a' + (i % 26)))));
+	}
 
 	EngineOptions opts;
 	opts.dry_run = true;
 
 	Repository observer(td.path() / "engine_test.db");
 
-	std::size_t scanned = 0;
-	std::string first_scanned_path;
-	EngineCallbacks cbs;
-	cbs.on_scan = [&](const std::string& path) {
-		++scanned;
-		if (scanned == 1) {
-			first_scanned_path = path;
-			return;
-		}
-		if (scanned != 2) {
-			return;
-		}
-
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-		while (std::chrono::steady_clock::now() < deadline) {
-			if (observer.find_by_path(first_scanned_path).has_value()) {
-				break;
+	std::atomic<bool> abort_requested = false;
+	std::atomic<bool> persisted_during_scan = false;
+	std::jthread interrupter([&](std::stop_token stop_token) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (!stop_token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+			for (const auto& path : file_paths) {
+				if (observer.find_by_path(path.string()).has_value()) {
+					persisted_during_scan = true;
+					abort_requested = true;
+					return;
+				}
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(2));
 		}
+	});
 
-		throw ScanInterrupted{};
-	};
+	EngineCallbacks cbs;
+	cbs.should_abort = [&] { return abort_requested.load(); };
 
 	EXPECT_THROW(run_engine(*repo, scan_opts, opts, cbs), ScanInterrupted);
+	EXPECT_TRUE(persisted_during_scan.load());
 
-	const bool has_a = repo->find_by_path(a.string()).has_value();
-	const bool has_b = repo->find_by_path(b.string()).has_value();
-	EXPECT_TRUE(has_a || has_b);
+	bool has_persisted_entry = false;
+	for (const auto& path : file_paths) {
+		if (repo->find_by_path(path.string()).has_value()) {
+			has_persisted_entry = true;
+			break;
+		}
+	}
+	EXPECT_TRUE(has_persisted_entry);
 }
 
 TEST_F(EngineTest, HashResultIsPersistedBeforeScanCompletes)
