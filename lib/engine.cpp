@@ -3,6 +3,7 @@
 #include "hasher.hpp"
 #include "scope_exit.hpp"
 
+#include <boost/container/flat_map.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <boost/asio/executor_work_guard.hpp>
@@ -17,7 +18,6 @@
 #include <chrono>
 #include <expected>
 #include <filesystem>
-#include <flat_map>
 #include <map>
 #include <queue>
 #include <random>
@@ -72,7 +72,7 @@ std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptio
 	                                          const std::vector<IndexEntry>& hashed_entries,
 	                                          AbortFn&& throw_if_main_aborted)
 {
-	std::flat_map<std::uint64_t, std::vector<IndexEntry>> indexed_by_size;
+	boost::container::flat_map<std::uint64_t, std::vector<IndexEntry>> indexed_by_size;
 	for (const auto& entry : cached_entries) {
 		indexed_by_size[entry.meta.size].push_back(entry);
 	}
@@ -87,7 +87,7 @@ std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptio
 
 		if (entries_for_size.size() < 2) continue;
 
-		std::flat_map<Digest, std::vector<IndexEntry>> by_digest;
+		boost::container::flat_map<Digest, std::vector<IndexEntry>> by_digest;
 		for (const auto& entry : entries_for_size) {
 			by_digest[entry.digest].push_back(entry);
 		}

@@ -15,10 +15,9 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     env:
-      CXX: g++-14
       VCPKG_BUILD_TYPE: release
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}/vcpkg_installed
 
@@ -46,7 +45,7 @@ jobs:
   publish:
     needs: test
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     permissions:
       contents: read
