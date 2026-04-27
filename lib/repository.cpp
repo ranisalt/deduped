@@ -109,10 +109,7 @@ struct Repository::Impl
 		}
 	}
 
-	void bootstrap_version()
-	{
-		set_user_version(kCurrentSchemaVersion);
-	}
+	void bootstrap_version() { set_user_version(kCurrentSchemaVersion); }
 
 	void set_user_version(const int version)
 	{

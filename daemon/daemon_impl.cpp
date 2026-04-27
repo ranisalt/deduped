@@ -9,7 +9,6 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
-
 #include <chrono>
 #include <csignal>
 #include <cstdlib>

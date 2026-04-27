@@ -6,14 +6,13 @@
 #include "../lib/scanner.hpp"
 #include "../lib/types.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
-
-#include <algorithm>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
-#include <atomic>
 #include <spdlog/spdlog.h>
 #include <thread>
 

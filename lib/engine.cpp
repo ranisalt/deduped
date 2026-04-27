@@ -3,17 +3,17 @@
 #include "hasher.hpp"
 #include "scope_exit.hpp"
 
-#include <boost/container/flat_map.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container_hash/hash.hpp>
+#include <algorithm>
+#include <atomic>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <boost/container/flat_map.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container_hash/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
-#include <algorithm>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <expected>
@@ -67,10 +67,9 @@ ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldA
 
 template <typename AbortFn>
 std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptions& engine_opts,
-	                                          const EngineCallbacks& cbs,
-	                                          const std::vector<IndexEntry>& cached_entries,
-	                                          const std::vector<IndexEntry>& hashed_entries,
-	                                          AbortFn&& throw_if_main_aborted)
+                                             const EngineCallbacks& cbs, const std::vector<IndexEntry>& cached_entries,
+                                             const std::vector<IndexEntry>& hashed_entries,
+                                             AbortFn&& throw_if_main_aborted)
 {
 	boost::container::flat_map<std::uint64_t, std::vector<IndexEntry>> indexed_by_size;
 	for (const auto& entry : cached_entries) {
@@ -143,13 +142,10 @@ std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptio
 
 template <typename SubmitFn, typename DrainFn, typename AbortFn>
 void process_scanned_path(Repository& repo, const std::filesystem::path& path, std::int64_t now,
-	                      InodeDigestCache& inode_cache,
-	                      InFlightInodes& in_flight_inodes,
-	                      DeferredSameInodeMap& deferred_same_inode,
-	                      std::vector<IndexEntry>& cached_entries,
-	                      const EngineCallbacks& cbs, SubmitFn&& submit_hash_job,
-	                      DrainFn&& drain_completed_results,
-	                      AbortFn&& throw_if_hashing_aborted)
+                          InodeDigestCache& inode_cache, InFlightInodes& in_flight_inodes,
+                          DeferredSameInodeMap& deferred_same_inode, std::vector<IndexEntry>& cached_entries,
+                          const EngineCallbacks& cbs, SubmitFn&& submit_hash_job, DrainFn&& drain_completed_results,
+                          AbortFn&& throw_if_hashing_aborted)
 {
 	try {
 		const auto meta = meta_from_path(path);
@@ -215,7 +211,7 @@ void process_scanned_path(Repository& repo, const std::filesystem::path& path, s
 }
 
 [[nodiscard]] std::expected<void, ApplyResult> validate_apply_preconditions(const DupePair& pair,
-	                                                                         const HashShouldAbortFn& should_abort)
+                                                                            const HashShouldAbortFn& should_abort)
 {
 	namespace fs = std::filesystem;
 	ApplyResult result;
@@ -269,7 +265,7 @@ void process_scanned_path(Repository& repo, const std::filesystem::path& path, s
 }
 
 void perform_atomic_hardlink_swap(const std::string& canonical_path, const std::string& duplicate_path,
-	                              const std::string& tmp_backup_path)
+                                  const std::string& tmp_backup_path)
 {
 	namespace fs = std::filesystem;
 	std::error_code ec;
@@ -509,7 +505,6 @@ std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_op
 		throw interrupted;
 	};
 
-
 	auto set_abort_state = [&](const ScanInterrupted& interrupted) {
 		abort_workers = true;
 		queued_hash_jobs.store(0);
@@ -574,11 +569,11 @@ std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_op
 			drain_completed_results();
 			capture_shutdown_during_hashing(interrupted);
 
-				if (queued_hash_jobs.load() == 0 && active_hashes.load() == 0 && completed_results.empty()) {
+			if (queued_hash_jobs.load() == 0 && active_hashes.load() == 0 && completed_results.empty()) {
 				break;
 			}
 
-				static_cast<void>(completion_context.run_one_for(std::chrono::milliseconds(10)));
+			static_cast<void>(completion_context.run_one_for(std::chrono::milliseconds(10)));
 		}
 		drain_completed_results();
 
@@ -609,21 +604,18 @@ std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_op
 			}
 
 			active_hashes.fetch_add(1);
-			auto active_hash = scope_exit{[&] {
-				active_hashes.fetch_sub(1);
-			}};
+			auto active_hash = scope_exit{[&] { active_hashes.fetch_sub(1); }};
 
 			try {
 				IndexEntry entry;
 				entry.path = job.path.string();
 				entry.meta = job.meta;
-				entry.digest =
-				    hash_file(job.path, [&] { return abort_workers.load() || (cbs.should_abort && cbs.should_abort()); });
+				entry.digest = hash_file(
+				    job.path, [&] { return abort_workers.load() || (cbs.should_abort && cbs.should_abort()); });
 				entry.last_seen = now;
-				boost::asio::post(completion_context,
-				           [&completed_results, entry = std::move(entry)]() mutable {
-					           completed_results.push(std::move(entry));
-				           });
+				boost::asio::post(completion_context, [&completed_results, entry = std::move(entry)]() mutable {
+					completed_results.push(std::move(entry));
+				});
 			} catch (const HashInterrupted&) {
 				boost::asio::post(completion_context, [&completed_results] { completed_results.push(std::nullopt); });
 				return;
@@ -645,14 +637,13 @@ std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_op
 			}
 			throw_if_hashing_aborted();
 
-			process_scanned_path(repo, p, now, inode_cache, in_flight_inodes, deferred_same_inode, cached_entries,
-			                   cbs, submit_hash_job, drain_completed_results,
-			                   throw_if_hashing_aborted);
+			process_scanned_path(repo, p, now, inode_cache, in_flight_inodes, deferred_same_inode, cached_entries, cbs,
+			                     submit_hash_job, drain_completed_results, throw_if_hashing_aborted);
 		});
 	} catch (const ScanInterrupted& ex) {
 		interrupted = std::unexpected(ex);
-		if (interrupted.error().pending_hash_jobs() == 0 && interrupted.error().in_flight_hash_jobs() == 0 && cbs.should_abort &&
-		    cbs.should_abort()) {
+		if (interrupted.error().pending_hash_jobs() == 0 && interrupted.error().in_flight_hash_jobs() == 0 &&
+		    cbs.should_abort && cbs.should_abort()) {
 			interrupted = std::unexpected(make_interrupt());
 		}
 	} catch (...) {

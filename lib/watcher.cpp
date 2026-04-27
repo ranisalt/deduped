@@ -1,11 +1,10 @@
 #include "watcher.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
-
-#include <algorithm>
-#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <exception>
@@ -49,10 +48,7 @@ struct Watcher::Impl
 		arm_inotify_wait();
 	}
 
-	~Impl() noexcept
-	{
-		stop();
-	}
+	~Impl() noexcept { stop(); }
 
 	void add_watch(const std::filesystem::path& dir, const bool required)
 	{
@@ -119,26 +115,25 @@ struct Watcher::Impl
 			return;
 		}
 
-		inotify_stream.async_wait(boost::asio::posix::stream_descriptor::wait_read,
-		                         [this](const boost::system::error_code& ec) {
-			                         if (ec) {
-				                         if (ec == boost::asio::error::operation_aborted && stop_requested.load()) {
-					                         return;
-				                         }
-				                         async_error = std::make_exception_ptr(
-				                             std::system_error(std::error_code(ec.value(), std::system_category()),
-				                                               "inotify wait"));
-				                         io_context.stop();
-				                         return;
-			                         }
+		inotify_stream.async_wait(
+		    boost::asio::posix::stream_descriptor::wait_read, [this](const boost::system::error_code& ec) {
+			    if (ec) {
+				    if (ec == boost::asio::error::operation_aborted && stop_requested.load()) {
+					    return;
+				    }
+				    async_error = std::make_exception_ptr(
+				        std::system_error(std::error_code(ec.value(), std::system_category()), "inotify wait"));
+				    io_context.stop();
+				    return;
+			    }
 
-			                         drain_inotify_events();
-			                         if (async_error || stop_requested.load()) {
-				                         return;
-			                         }
+			    drain_inotify_events();
+			    if (async_error || stop_requested.load()) {
+				    return;
+			    }
 
-			                         arm_inotify_wait();
-		                         });
+			    arm_inotify_wait();
+		    });
 	}
 
 	void drain_inotify_events()
@@ -151,7 +146,8 @@ struct Watcher::Impl
 			if (len < 0) {
 				if (errno == EAGAIN || errno == EWOULDBLOCK) break;
 				if (errno == EINTR) continue;
-				async_error = std::make_exception_ptr(std::system_error(errno, std::generic_category(), "inotify read"));
+				async_error =
+				    std::make_exception_ptr(std::system_error(errno, std::generic_category(), "inotify read"));
 				io_context.stop();
 				return;
 			}
