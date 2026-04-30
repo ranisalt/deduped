@@ -1,17 +1,15 @@
 #include "daemon_impl.hpp"
 
+#include "../lib/dedup_session.hpp"
 #include "../lib/engine.hpp"
+#include "../lib/lock_file.hpp"
 #include "../lib/logging.hpp"
-#include "../lib/repository.hpp"
 #include "../lib/scanner.hpp"
-#include "../lib/scope_exit.hpp"
+#include "../lib/signal_watcher.hpp"
 #include "../lib/watcher.hpp"
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/signal_set.hpp>
 #include <cerrno>
 #include <chrono>
-#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
@@ -21,7 +19,6 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <unistd.h>
 #include <unordered_set>
 
@@ -102,42 +99,6 @@ bool check_dir_access(const std::filesystem::path& dir, std::string_view label, 
 	return true;
 }
 
-class LockFile
-{
-public:
-	explicit LockFile(std::filesystem::path p) : path_(std::move(p))
-	{
-		fd_ = ::open(path_.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
-		if (fd_ == -1) {
-			if (errno == EEXIST) {
-				throw std::runtime_error("Lock already exists - daemon already running? " + path_.string());
-			}
-
-			const auto ec = std::error_code(errno, std::generic_category());
-			throw std::runtime_error("Cannot create lock file: " + path_.string() + ": " + ec.message());
-		}
-	}
-
-	~LockFile()
-	{
-		if (fd_ != -1) {
-			::close(fd_);
-		}
-
-		std::error_code ec;
-		std::filesystem::remove(path_, ec);
-	}
-
-	LockFile(const LockFile&) = delete;
-	LockFile& operator=(const LockFile&) = delete;
-	LockFile(LockFile&&) = delete;
-	LockFile& operator=(LockFile&&) = delete;
-
-private:
-	std::filesystem::path path_;
-	int fd_ = -1;
-};
-
 int init_daemon_without_watcher_impl(const std::string& config_dir, const std::vector<std::string>& data_dirs,
                                      const std::string& log_level, bool apply_flag, ApplyResultLogger& apply_logger,
                                      std::optional<LockFile>* held_lock = nullptr)
@@ -193,34 +154,23 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 	spdlog::info("deduped started. config={} data=[{}] db={} apply={}", config_root.string(), data_str,
 	             db_path.string(), apply_flag);
 
-	Repository repo{db_path};
-	EngineOptions engine_opts;
-	engine_opts.dry_run = !apply_flag;
+	DedupSession session{{
+	    .db_path = db_path,
+	    .data_roots = data_roots,
+	    .engine_opts = {.dry_run = !apply_flag},
+	}};
 
-	EngineCallbacks recovery_cbs;
-	recovery_cbs.on_apply = [](const ApplyResult& r) {
-		if (r.status == ApplyStatus::Linked) {
-			spdlog::warn("RECOVERED LINKED {}", r.pair.duplicate_path);
-		} else if (r.status == ApplyStatus::Failed) {
-			spdlog::warn("RECOVERY FAILED {}: {}", r.pair.duplicate_path, r.message);
-		}
-	};
-	recover_pending_operations(repo, recovery_cbs);
+	session.recover();
 
 	spdlog::info("Running startup reconciliation scan...");
 	try {
-		ScanOptions scan_opts;
-		scan_opts.roots = data_roots;
-
 		EngineCallbacks cbs;
 		cbs.on_dupe_found = [](const DupePair& p) {
 			spdlog::info("RECONCILE DUPE  {} == {}", p.canonical_path, p.duplicate_path);
 		};
-		cbs.on_apply = [&](const ApplyResult& r) {
-			apply_logger.log(r, true);
-		};
+		cbs.on_apply = [&](const ApplyResult& r) { apply_logger.log(r, true); };
 
-		run_engine(repo, scan_opts, engine_opts, cbs);
+		session.run_full_scan(cbs);
 	} catch (const std::exception& ex) {
 		spdlog::error("Reconciliation error: {}", ex.what());
 		return EXIT_FAILURE;
@@ -252,6 +202,7 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 	}
 
 	const std::filesystem::path config_root = std::filesystem::absolute(config_dir);
+	const std::filesystem::path db_path = config_root / "deduped.db";
 	std::vector<std::filesystem::path> data_roots;
 	data_roots.reserve(data_dirs.size());
 	for (const auto& dir : data_dirs) {
@@ -262,36 +213,28 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 	watch_cbs.on_dupe_found = [](const DupePair& p) {
 		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
 	};
-	watch_cbs.on_apply = [&](const ApplyResult& r) {
-		apply_logger.log(r, false);
-	};
+	watch_cbs.on_apply = [&](const ApplyResult& r) { apply_logger.log(r, false); };
 
-	EngineOptions watch_engine_opts;
-	watch_engine_opts.dry_run = !apply_flag;
+	const EngineOptions watch_engine_opts{.dry_run = !apply_flag};
 
 	try {
 		Watcher watcher(data_roots, [&](const WatchEvent& ev) {
-			Repository repo{config_root / "deduped.db"};
+			DedupSession event_session{{
+			    .db_path = db_path,
+			    .data_roots = data_roots,
+			    .engine_opts = watch_engine_opts,
+			}};
 
 			if (ev.type == FileEvent::Modified) {
 				spdlog::debug("EVENT modified {}", ev.path.string());
-				handle_file_change(repo, ev.path, watch_engine_opts, watch_cbs);
+				event_session.handle_change(ev.path, watch_cbs);
 			} else {
 				spdlog::debug("EVENT deleted {}", ev.path.string());
-				handle_file_removed(repo, ev.path);
+				event_session.handle_removed(ev.path);
 			}
 		});
 
-		boost::asio::io_context signal_context;
-		boost::asio::signal_set signals(signal_context, SIGINT, SIGTERM);
-		signals.async_wait([&](const boost::system::error_code& ec, int) {
-			if (!ec) {
-				watcher.stop();
-			}
-			signal_context.stop();
-		});
-		std::jthread signal_thread([&](std::stop_token) { signal_context.run(); });
-		auto stop_signal_context = scope_exit{[&] { signal_context.stop(); }};
+		SignalWatcher signal_watcher{[&] { watcher.stop(); }};
 
 		watcher.run();
 	} catch (const std::exception& ex) {

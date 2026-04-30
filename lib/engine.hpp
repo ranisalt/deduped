@@ -65,7 +65,7 @@ struct ResolvedDigest
 
 // Internal helper shared by full scans and event handling.
 // Exposed in the header so unit tests can verify the metadata-cache policy.
-[[nodiscard]] ResolvedDigest resolve_digest(Repository& repo, const std::filesystem::path& path,
+[[nodiscard]] ResolvedDigest resolve_digest(IRepository& repo, const std::filesystem::path& path,
                                             const FileMeta& current_meta, const HashFileFn& hash_file_fn);
 
 } // namespace detail
@@ -77,12 +77,12 @@ struct ResolvedDigest
 //      In apply mode: create hardlinks and log operations.
 //   4. Purge index entries for files no longer present on disk.
 // Returns the list of results (apply mode) or planned pairs (dry-run mode).
-std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_opts, const EngineOptions& engine_opts,
+std::vector<ApplyResult> run_engine(IRepository& repo, const ScanOptions& scan_opts, const EngineOptions& engine_opts,
                                     const EngineCallbacks& cbs = {});
 
 // Recover interrupted hardlink operations recorded in the op log.
 // Safe to run at startup before scanning or watching.
-void recover_pending_operations(Repository& repo, const EngineCallbacks& cbs = {});
+void recover_pending_operations(IRepository& repo, const EngineCallbacks& cbs = {});
 
 // Handle a file-level inotify event: file created or written to completion.
 //   - Hashes the file (uses cached hash when metadata is still valid).
@@ -90,12 +90,12 @@ void recover_pending_operations(Repository& repo, const EngineCallbacks& cbs = {
 //   - If a duplicate is found, reports it via cbs.on_dupe_found and,
 //     in non-dry_run mode, creates a hardlink.
 // Returns the ApplyResult when a duplicate was found, nullopt otherwise.
-std::optional<ApplyResult> handle_file_change(Repository& repo, const std::filesystem::path& path,
+std::optional<ApplyResult> handle_file_change(IRepository& repo, const std::filesystem::path& path,
                                               const EngineOptions& opts, const EngineCallbacks& cbs = {});
 
 // Handle a file-level inotify event: file deleted or moved out.
 //   - Removes the entry from the index.
 //   - No-op if the path is not indexed.
-void handle_file_removed(Repository& repo, const std::filesystem::path& path);
+void handle_file_removed(IRepository& repo, const std::filesystem::path& path);
 
 } // namespace deduped

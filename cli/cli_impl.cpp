@@ -1,57 +1,18 @@
 #include "cli_impl.hpp"
 
+#include "../lib/dedup_session.hpp"
 #include "../lib/engine.hpp"
 #include "../lib/logging.hpp"
-#include "../lib/repository.hpp"
 #include "../lib/scanner.hpp"
+#include "../lib/signal_watcher.hpp"
 #include "../lib/types.hpp"
 
 #include <algorithm>
-#include <atomic>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/signal_set.hpp>
-#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <spdlog/spdlog.h>
-#include <thread>
 
 namespace deduped {
-
-namespace {
-
-class SignalWatcher
-{
-public:
-	SignalWatcher() : signals_(io_context_, SIGINT, SIGTERM)
-	{
-		signals_.async_wait([this](const boost::system::error_code& ec, int) {
-			if (!ec) {
-				termination_requested_.store(true);
-			}
-			io_context_.stop();
-		});
-
-		thread_ = std::jthread([this](std::stop_token) { io_context_.run(); });
-	}
-
-	~SignalWatcher()
-	{
-		boost::system::error_code ec;
-		signals_.cancel(ec);
-		io_context_.stop();
-	}
-
-	[[nodiscard]] bool termination_requested() const noexcept { return termination_requested_.load(); }
-
-private:
-	std::atomic<bool> termination_requested_{false};
-	boost::asio::io_context io_context_;
-	boost::asio::signal_set signals_;
-	std::jthread thread_;
-};
-
-} // namespace
 
 namespace {
 
@@ -141,32 +102,26 @@ int run_cli_impl(const std::string& db_dir, const std::vector<std::string>& root
 
 	const std::filesystem::path db_path = db_root / "deduped.db";
 	spdlog::info("Using database: {}", db_path.string());
-	Repository repo{db_path};
-	SignalWatcher signal_watcher;
 
-	ScanOptions scan_opts;
-	scan_opts.roots.reserve(roots.size());
-	std::transform(roots.begin(), roots.end(), std::back_inserter(scan_opts.roots),
+	std::vector<std::filesystem::path> data_roots;
+	data_roots.reserve(roots.size());
+	std::transform(roots.begin(), roots.end(), std::back_inserter(data_roots),
 	               [](const std::string& root) { return std::filesystem::absolute(root); });
 
-	EngineOptions engine_opts;
-	engine_opts.dry_run = !apply_flag;
+	DedupSession session{{
+	    .db_path = db_path,
+	    .data_roots = std::move(data_roots),
+	    .engine_opts = {.dry_run = !apply_flag},
+	}};
+	SignalWatcher signal_watcher;
 
 	ScanCounters counters;
 	const EngineCallbacks cbs = make_engine_callbacks(signal_watcher, counters);
 
-	EngineCallbacks recovery_cbs;
-	recovery_cbs.on_apply = [](const ApplyResult& r) {
-		if (r.status == ApplyStatus::Linked) {
-			spdlog::warn("RECOVERED LINKED {}", r.pair.duplicate_path);
-		} else if (r.status == ApplyStatus::Failed) {
-			spdlog::warn("RECOVERY FAILED {}: {}", r.pair.duplicate_path, r.message);
-		}
-	};
-	recover_pending_operations(repo, recovery_cbs);
+	session.recover();
 
 	try {
-		run_engine(repo, scan_opts, engine_opts, cbs);
+		session.run_full_scan(cbs);
 	} catch (const ScanInterrupted&) {
 		spdlog::info("Done. Scanned={} Hits={} Misses={} Dupes={} Linked={} Failed={}", counters.scanned, counters.hits,
 		             counters.misses, counters.dupes, counters.linked, counters.failed);

@@ -76,3 +76,8 @@ add_subdirectory(daemon)
 if(BUILD_TESTING)
 	add_subdirectory(tests)
 endif()
+
+include(GNUInstallDirs)
+install(TARGETS deduped deduped-cli
+	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)

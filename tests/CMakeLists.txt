@@ -51,9 +51,6 @@ target_compile_definitions(integration_tests
 
 gtest_discover_tests(integration_tests LABELS integration)
 
-option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
-option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
-
 # Apply sanitizers to the library too, so bugs in library code are caught when
 # running the test suite with sanitizers enabled.
 foreach(tgt deduped_lib unit_tests integration_tests)
@@ -67,7 +64,6 @@ foreach(tgt deduped_lib unit_tests integration_tests)
     endif()
 endforeach()
 
-option(ENABLE_COVERAGE "Enable coverage flags" OFF)
 if(ENABLE_COVERAGE)
     foreach(tgt unit_tests integration_tests)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")

@@ -538,8 +538,10 @@ TEST(DaemonBinaryTest, MissingConfigDirectoryFails)
 	EXPECT_NE(exit_code, 0);
 }
 
-TEST(DaemonBinaryTest, ExistingLockFilePreventsStart)
+TEST(DaemonBinaryTest, StaleLockFileDoesNotBlockStart)
 {
+	// A daemon that crashed (SIGKILL) leaves the lock file on disk but the
+	// kernel-released flock makes it harmless. A new daemon must start cleanly.
 	TempDir td;
 	const auto config = td.path() / "config";
 	fs::create_directories(config);
@@ -549,7 +551,7 @@ TEST(DaemonBinaryTest, ExistingLockFilePreventsStart)
 
 	const int exit_code = init_daemon_without_watcher(config.string(), {root.string()}, "", false);
 
-	EXPECT_NE(exit_code, 0);
+	EXPECT_EQ(exit_code, 0);
 }
 
 TEST(DaemonBinaryTest, RunningDaemonKeepsLockFileUntilShutdown)

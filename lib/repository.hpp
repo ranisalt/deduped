@@ -5,46 +5,17 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace deduped {
 
-// Repository owns the SQLite connection and executes all DB operations.
-// All methods are thread-hostile (call from a single thread or serialize externally).
-class Repository
+// Abstract index/operation log interface. The engine depends only on this so
+// alternative backends (in-memory mocks, alternate databases) can be plugged
+// in without touching the engine.
+class IRepository
 {
 public:
-	// Open (or create) the database at `db_path`.
-	// Initializes schema objects and enables WAL mode.
-	explicit Repository(const std::filesystem::path& db_path);
-	~Repository();
-
-	Repository(const Repository&) = delete;
-	Repository& operator=(const Repository&) = delete;
-	Repository(Repository&&) = delete;
-	Repository& operator=(Repository&&) = delete;
-
-	// Upsert a file record.  If a row with the same path already exists its
-	// metadata, digest, and last_seen timestamp are updated.
-	void upsert(const IndexEntry& entry);
-
-	// Look up a file by its absolute path.  Returns nullopt if not found.
-	[[nodiscard]] std::optional<IndexEntry> find_by_path(const std::string& path) const;
-
-	// Look up a file identity by device+inode. Returns nullopt if not found.
-	// Path in the returned entry is one representative alias.
-	[[nodiscard]] std::optional<IndexEntry> find_by_inode(std::uint64_t device, std::uint64_t inode) const;
-
-	// Return all entries that share the given digest (for duplicate detection).
-	[[nodiscard]] std::vector<IndexEntry> find_by_digest(const Digest& digest) const;
-
-	// Mark all rows not seen since `cutoff_unix_s` as deleted (removes them).
-	void remove_stale(std::int64_t cutoff_unix_s);
-
-	// Remove a single file record by its absolute path.
-	// No-op if the path is not in the index.
-	void remove_by_path(const std::string& path);
-
 	enum class OpStatus
 	{
 		Planned,
@@ -62,19 +33,53 @@ public:
 		std::string message;
 	};
 
-	// Record an intended hardlink operation before it executes.
-	// Returns the log rowid.
+	IRepository() = default;
+	virtual ~IRepository() = default;
+
+	IRepository(const IRepository&) = delete;
+	IRepository& operator=(const IRepository&) = delete;
+	IRepository(IRepository&&) = delete;
+	IRepository& operator=(IRepository&&) = delete;
+
+	virtual void upsert(const IndexEntry& entry) = 0;
+	[[nodiscard]] virtual std::optional<IndexEntry> find_by_path(const std::string& path) const = 0;
+	[[nodiscard]] virtual std::optional<IndexEntry> find_by_inode(std::uint64_t device,
+	                                                              std::uint64_t inode) const = 0;
+	[[nodiscard]] virtual std::vector<IndexEntry> find_by_digest(const Digest& digest) const = 0;
+	virtual void remove_stale(std::int64_t cutoff_unix_s) = 0;
+	virtual void remove_by_path(const std::string& path) = 0;
+
+	[[nodiscard]] virtual std::int64_t log_op_planned(const std::string& canonical, const std::string& duplicate,
+	                                                  const std::string& backup_path = {}) = 0;
+	virtual void log_op_complete(std::int64_t op_id, OpStatus status, const std::string& message = {}) = 0;
+	[[nodiscard]] virtual std::vector<LoggedOp> list_ops(OpStatus status) const = 0;
+
+	[[nodiscard]] virtual std::int64_t now_unix_s() const = 0;
+};
+
+// SQLite-backed concrete repository. All methods are thread-hostile; serialize
+// access externally if used from multiple threads.
+class Repository final : public IRepository
+{
+public:
+	// Open (or create) the database at `db_path`.
+	// Initializes schema objects and enables WAL mode.
+	explicit Repository(const std::filesystem::path& db_path);
+	~Repository() override;
+
+	void upsert(const IndexEntry& entry) override;
+	[[nodiscard]] std::optional<IndexEntry> find_by_path(const std::string& path) const override;
+	[[nodiscard]] std::optional<IndexEntry> find_by_inode(std::uint64_t device, std::uint64_t inode) const override;
+	[[nodiscard]] std::vector<IndexEntry> find_by_digest(const Digest& digest) const override;
+	void remove_stale(std::int64_t cutoff_unix_s) override;
+	void remove_by_path(const std::string& path) override;
+
 	[[nodiscard]] std::int64_t log_op_planned(const std::string& canonical, const std::string& duplicate,
-	                                          const std::string& backup_path = {});
+	                                          const std::string& backup_path = {}) override;
+	void log_op_complete(std::int64_t op_id, OpStatus status, const std::string& message = {}) override;
+	[[nodiscard]] std::vector<LoggedOp> list_ops(OpStatus status) const override;
 
-	// Update the outcome of a previously planned operation.
-	void log_op_complete(std::int64_t op_id, OpStatus status, const std::string& message = {});
-
-	// List operations matching the given status.
-	[[nodiscard]] std::vector<LoggedOp> list_ops(OpStatus status) const;
-
-	// Current UNIX timestamp in seconds (uses the SQLite connection for consistency).
-	[[nodiscard]] std::int64_t now_unix_s() const;
+	[[nodiscard]] std::int64_t now_unix_s() const override;
 
 private:
 	struct Impl;

@@ -1,74 +1,31 @@
 #include "engine.hpp"
 
 #include "hasher.hpp"
+#include "scan_coordinator.hpp"
 #include "scope_exit.hpp"
 
 #include <algorithm>
-#include <atomic>
-#include <boost/asio/executor_work_guard.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/thread_pool.hpp>
 #include <boost/container/flat_map.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container_hash/hash.hpp>
-#include <boost/unordered/unordered_flat_map.hpp>
-#include <boost/unordered/unordered_flat_set.hpp>
 #include <cerrno>
 #include <chrono>
 #include <expected>
 #include <filesystem>
-#include <map>
-#include <queue>
 #include <random>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <system_error>
-#include <thread>
 #include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace deduped {
 
 namespace {
 
-struct HashJob
-{
-	std::filesystem::path path;
-	FileMeta meta;
-};
-
-using DeferredHashJobs = boost::container::small_vector<HashJob, 2>;
-
-struct InodeKey
-{
-	std::uint64_t device{};
-	std::uint64_t inode{};
-	[[nodiscard]] bool operator==(const InodeKey&) const noexcept = default;
-};
-
-struct InodeKeyHash
-{
-	std::size_t operator()(const InodeKey& k) const noexcept
-	{
-		std::size_t h = 0;
-		boost::hash_combine(h, k.device);
-		boost::hash_combine(h, k.inode);
-		return h;
-	}
-};
-
-using InodeDigestCache = boost::unordered_flat_map<InodeKey, Digest, InodeKeyHash>;
-using InFlightInodes = boost::unordered_flat_set<InodeKey, InodeKeyHash>;
-using DeferredSameInodeMap = boost::unordered_flat_map<InodeKey, DeferredHashJobs, InodeKeyHash>;
-
 constexpr std::string_view kDuplicatePathNotWritableMessage = "duplicate path not writable, skipped";
 
-ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldAbortFn& should_abort);
+ApplyResult apply_pair(IRepository& repo, const DupePair& pair, const HashShouldAbortFn& should_abort);
 
 template <typename AbortFn>
-std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptions& engine_opts,
+std::vector<ApplyResult> build_apply_results(IRepository& repo, const EngineOptions& engine_opts,
                                              const EngineCallbacks& cbs, const std::vector<IndexEntry>& cached_entries,
                                              const std::vector<IndexEntry>& hashed_entries,
                                              AbortFn&& throw_if_main_aborted)
@@ -140,76 +97,6 @@ std::vector<ApplyResult> build_apply_results(Repository& repo, const EngineOptio
 	}
 
 	return results;
-}
-
-template <typename SubmitFn, typename DrainFn, typename AbortFn>
-void process_scanned_path(Repository& repo, const std::filesystem::path& path, std::int64_t now,
-                          InodeDigestCache& inode_cache, InFlightInodes& in_flight_inodes,
-                          DeferredSameInodeMap& deferred_same_inode, std::vector<IndexEntry>& cached_entries,
-                          const EngineCallbacks& cbs, SubmitFn&& submit_hash_job, DrainFn&& drain_completed_results,
-                          AbortFn&& throw_if_hashing_aborted)
-{
-	try {
-		const auto meta = meta_from_path(path);
-		const InodeKey inode_key{meta.device, meta.inode};
-
-		if (const auto it = inode_cache.find(inode_key); it != inode_cache.end()) {
-			IndexEntry entry;
-			entry.path = path.string();
-			entry.meta = meta;
-			entry.digest = it->second;
-			entry.last_seen = now;
-			repo.upsert(entry);
-			cached_entries.push_back(std::move(entry));
-			if (cbs.on_scan_decision) {
-				cbs.on_scan_decision(path.string(), ScanCacheStatus::Hit);
-			}
-			drain_completed_results();
-			throw_if_hashing_aborted();
-			return;
-		}
-
-		const auto existing = repo.find_by_inode(meta.device, meta.inode);
-		if (existing && !is_meta_stale(existing->meta, meta)) {
-			IndexEntry entry;
-			entry.path = path.string();
-			entry.meta = meta;
-			entry.digest = existing->digest;
-			entry.last_seen = now;
-			inode_cache[inode_key] = existing->digest;
-			repo.upsert(entry);
-			cached_entries.push_back(std::move(entry));
-			if (cbs.on_scan_decision) {
-				cbs.on_scan_decision(path.string(), ScanCacheStatus::Hit);
-			}
-			drain_completed_results();
-			throw_if_hashing_aborted();
-			return;
-		}
-
-		if (in_flight_inodes.find(inode_key) != in_flight_inodes.end()) {
-			deferred_same_inode[inode_key].push_back(HashJob{.path = path, .meta = meta});
-			if (cbs.on_scan_decision) {
-				cbs.on_scan_decision(path.string(), ScanCacheStatus::Hit);
-			}
-			drain_completed_results();
-			throw_if_hashing_aborted();
-			return;
-		}
-
-		in_flight_inodes.insert(inode_key);
-		submit_hash_job(HashJob{.path = path, .meta = meta});
-		if (cbs.on_scan_decision) {
-			cbs.on_scan_decision(path.string(), ScanCacheStatus::Miss);
-		}
-		drain_completed_results();
-		throw_if_hashing_aborted();
-
-	} catch (const ScanInterrupted&) {
-		throw;
-	} catch (const std::exception& ex) {
-		spdlog::debug("skipping {}: {}", path.string(), ex.what());
-	}
 }
 
 [[nodiscard]] std::expected<void, ApplyResult> validate_apply_preconditions(const DupePair& pair,
@@ -317,7 +204,7 @@ void throw_if_aborted(const EngineCallbacks& cbs)
 
 namespace detail {
 
-ResolvedDigest resolve_digest(Repository& repo, const std::filesystem::path& path, const FileMeta& current_meta,
+ResolvedDigest resolve_digest(IRepository& repo, const std::filesystem::path& path, const FileMeta& current_meta,
                               const HashFileFn& hash_file_fn)
 {
 	const auto existing = repo.find_by_path(path.string());
@@ -338,7 +225,7 @@ namespace {
 //   4. link(canonical, duplicate).
 //   5. Remove the renamed temp file.
 //   On any failure: restore from temp, update log.
-ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldAbortFn& should_abort = {})
+ApplyResult apply_pair(IRepository& repo, const DupePair& pair, const HashShouldAbortFn& should_abort = {})
 {
 	ApplyResult result;
 	result.pair = pair;
@@ -399,7 +286,7 @@ ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldA
 
 } // namespace
 
-void recover_pending_operations(Repository& repo, const EngineCallbacks& cbs)
+void recover_pending_operations(IRepository& repo, const EngineCallbacks& cbs)
 {
 	namespace fs = std::filesystem;
 
@@ -455,233 +342,54 @@ void recover_pending_operations(Repository& repo, const EngineCallbacks& cbs)
 	}
 }
 
-std::vector<ApplyResult> run_engine(Repository& repo, const ScanOptions& scan_opts, const EngineOptions& engine_opts,
+std::vector<ApplyResult> run_engine(IRepository& repo, const ScanOptions& scan_opts, const EngineOptions& engine_opts,
                                     const EngineCallbacks& cbs)
 {
 	const auto now = repo.now_unix_s();
 
-	boost::asio::io_context completion_context;
-	auto completion_work = boost::asio::make_work_guard(completion_context);
-	std::queue<std::optional<IndexEntry>> completed_results;
-	std::vector<IndexEntry> hashed_entries;
-	std::vector<IndexEntry> cached_entries;
-	InodeDigestCache inode_cache;
-	InFlightInodes in_flight_inodes;
-	DeferredSameInodeMap deferred_same_inode;
+	detail::ScanCoordinator coord{repo, cbs, now};
+	detail::InterruptState interrupted;
 
-	std::atomic<bool> abort_workers{false};
-
-	const auto worker_count = std::max(1u, std::thread::hardware_concurrency());
-	boost::asio::thread_pool hash_pool{worker_count};
-	std::atomic<std::size_t> queued_hash_jobs{0};
-	std::atomic<std::size_t> active_hashes{0};
-
-	bool shutdown_notified{false};
-	using InterruptState = std::expected<void, ScanInterrupted>;
-
-	auto make_interrupt = [&]() {
-		const auto queued = queued_hash_jobs.load();
-		const auto in_flight_hash_jobs = active_hashes.load();
-		return ScanInterrupted{queued + in_flight_hash_jobs, in_flight_hash_jobs};
-	};
-
-	auto notify_shutdown_requested = [&](const ScanInterrupted& interrupted) {
-		if (shutdown_notified) {
-			return;
-		}
-		shutdown_notified = true;
-		if (cbs.on_shutdown_requested) {
-			cbs.on_shutdown_requested(interrupted.pending_hash_jobs(), interrupted.in_flight_hash_jobs());
-		}
-	};
-
-	auto capture_hashing_abort = [&]() -> InterruptState {
-		if (!(cbs.should_abort && cbs.should_abort())) {
-			return {};
-		}
-
-		auto interrupted = make_interrupt();
-		notify_shutdown_requested(interrupted);
-		return std::unexpected(interrupted);
-	};
-
-	auto throw_if_hashing_aborted = [&]() {
-		if (auto interrupted = capture_hashing_abort(); !interrupted.has_value()) {
-			throw interrupted.error();
-		}
-	};
-
-	auto throw_if_main_aborted = [&]() {
-		if (!(cbs.should_abort && cbs.should_abort())) {
-			return;
-		}
-
-		const ScanInterrupted interrupted{};
-		notify_shutdown_requested(interrupted);
-		throw interrupted;
-	};
-
-	auto set_abort_state = [&](const ScanInterrupted& interrupted) {
-		abort_workers = true;
-		queued_hash_jobs.store(0);
-		hash_pool.stop();
-		completion_work.reset();
-		notify_shutdown_requested(interrupted);
-	};
-
-	auto drain_completed_results = [&]() {
-		completion_context.poll();
-
-		while (!completed_results.empty()) {
-			auto maybe_entry = std::move(completed_results.front());
-			completed_results.pop();
-
-			if (!maybe_entry) {
-				continue;
-			}
-
-			auto entry = std::move(*maybe_entry);
-			const InodeKey key{entry.meta.device, entry.meta.inode};
-			inode_cache[key] = entry.digest;
-			in_flight_inodes.erase(key);
-			repo.upsert(entry);
-			hashed_entries.push_back(std::move(entry));
-
-			if (auto it = deferred_same_inode.find(key); it != deferred_same_inode.end()) {
-				for (const auto& deferred : it->second) {
-					IndexEntry deferred_entry;
-					deferred_entry.path = deferred.path.string();
-					deferred_entry.meta = deferred.meta;
-					deferred_entry.digest = inode_cache[key];
-					deferred_entry.last_seen = now;
-					repo.upsert(deferred_entry);
-					cached_entries.push_back(std::move(deferred_entry));
-				}
-				deferred_same_inode.erase(it);
-			}
-		}
-	};
-
-	auto capture_shutdown_during_hashing = [&](InterruptState& interrupted) {
-		if (!interrupted.has_value()) {
-			return;
-		}
-
-		if (auto requested = capture_hashing_abort(); !requested.has_value()) {
-			interrupted = std::move(requested);
-			set_abort_state(interrupted.error());
-		}
-	};
-
-	auto finish_hashing = [&](InterruptState interrupted) -> InterruptState {
-		if (!interrupted.has_value()) {
-			set_abort_state(interrupted.error());
-		} else {
-			capture_shutdown_during_hashing(interrupted);
-		}
-
-		for (;;) {
-			capture_shutdown_during_hashing(interrupted);
-			drain_completed_results();
-			capture_shutdown_during_hashing(interrupted);
-
-			if (queued_hash_jobs.load() == 0 && active_hashes.load() == 0 && completed_results.empty()) {
-				break;
-			}
-
-			static_cast<void>(completion_context.run_one_for(std::chrono::milliseconds(10)));
-		}
-		drain_completed_results();
-
-		hash_pool.join();
-
-		if (interrupted.has_value() && cbs.should_abort) {
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(25);
-			while (interrupted.has_value() && std::chrono::steady_clock::now() < deadline) {
-				capture_shutdown_during_hashing(interrupted);
-				if (interrupted.has_value()) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				}
-			}
-		}
-
-		return interrupted;
-	};
-
-	auto submit_hash_job = [&](HashJob job) {
-		queued_hash_jobs.fetch_add(1);
-		boost::asio::post(hash_pool, [&, job = std::move(job)]() mutable {
-			// This job has started executing, so it's no longer "queued".
-			queued_hash_jobs.fetch_sub(1);
-
-			if (abort_workers.load()) {
-				boost::asio::post(completion_context, [&completed_results] { completed_results.push(std::nullopt); });
-				return;
-			}
-
-			active_hashes.fetch_add(1);
-			auto active_hash = scope_exit{[&] { active_hashes.fetch_sub(1); }};
-
-			try {
-				IndexEntry entry;
-				entry.path = job.path.string();
-				entry.meta = job.meta;
-				entry.digest = hash_file(
-				    job.path, [&] { return abort_workers.load() || (cbs.should_abort && cbs.should_abort()); });
-				entry.last_seen = now;
-				boost::asio::post(completion_context, [&completed_results, entry = std::move(entry)]() mutable {
-					completed_results.push(std::move(entry));
-				});
-			} catch (const HashInterrupted&) {
-				boost::asio::post(completion_context, [&completed_results] { completed_results.push(std::nullopt); });
-				return;
-			} catch (const std::exception& ex) {
-				spdlog::debug("skipping {}: {}", job.path.string(), ex.what());
-				boost::asio::post(completion_context, [&completed_results] { completed_results.push(std::nullopt); });
-			}
-		});
-	};
-
-	InterruptState interrupted;
 	try {
 		scan_files(scan_opts, [&](const std::filesystem::path& p) {
-			drain_completed_results();
-			throw_if_hashing_aborted();
+			coord.drain_completed_results();
+			coord.throw_if_hashing_aborted();
 
 			if (cbs.on_scan) {
 				cbs.on_scan(p.string());
 			}
-			throw_if_hashing_aborted();
+			coord.throw_if_hashing_aborted();
 
-			process_scanned_path(repo, p, now, inode_cache, in_flight_inodes, deferred_same_inode, cached_entries, cbs,
-			                     submit_hash_job, drain_completed_results, throw_if_hashing_aborted);
+			coord.process_scanned_path(p);
 		});
 	} catch (const ScanInterrupted& ex) {
 		interrupted = std::unexpected(ex);
 		if (interrupted.error().pending_hash_jobs() == 0 && interrupted.error().in_flight_hash_jobs() == 0 &&
 		    cbs.should_abort && cbs.should_abort()) {
-			interrupted = std::unexpected(make_interrupt());
+			interrupted = std::unexpected(coord.make_interrupt());
 		}
 	} catch (...) {
-		static_cast<void>(finish_hashing(InterruptState{}));
+		static_cast<void>(coord.finish_hashing(detail::InterruptState{}));
 		throw;
 	}
 
-	interrupted = finish_hashing(interrupted);
-	completion_work.reset();
+	interrupted = coord.finish_hashing(interrupted);
+	coord.release_completion_work();
 	if (!interrupted.has_value()) {
 		throw interrupted.error();
 	}
 
-	auto results = build_apply_results(repo, engine_opts, cbs, cached_entries, hashed_entries, throw_if_main_aborted);
+	auto throw_if_main_aborted = [&] { coord.throw_if_main_aborted(); };
+	auto results = build_apply_results(repo, engine_opts, cbs, coord.cached_entries(), coord.hashed_entries(),
+	                                   throw_if_main_aborted);
 
-	throw_if_main_aborted();
+	coord.throw_if_main_aborted();
 	repo.remove_stale(now - 1);
 
 	return results;
 }
 
-std::optional<ApplyResult> handle_file_change(Repository& repo, const std::filesystem::path& path,
+std::optional<ApplyResult> handle_file_change(IRepository& repo, const std::filesystem::path& path,
                                               const EngineOptions& opts, const EngineCallbacks& cbs)
 {
 	namespace fs = std::filesystem;
@@ -756,6 +464,6 @@ std::optional<ApplyResult> handle_file_change(Repository& repo, const std::files
 	}
 }
 
-void handle_file_removed(Repository& repo, const std::filesystem::path& path) { repo.remove_by_path(path.string()); }
+void handle_file_removed(IRepository& repo, const std::filesystem::path& path) { repo.remove_by_path(path.string()); }
 
 } // namespace deduped
