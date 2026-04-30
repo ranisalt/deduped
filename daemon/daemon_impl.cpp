@@ -9,16 +9,20 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <optional>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <unordered_set>
 
 namespace deduped {
@@ -26,6 +30,7 @@ namespace deduped {
 namespace {
 
 constexpr std::string_view kDuplicatePathNotWritableMessage = "duplicate path not writable, skipped";
+constexpr std::string_view kLockFileName = "deduped.lock";
 
 class ApplyResultLogger
 {
@@ -97,35 +102,45 @@ bool check_dir_access(const std::filesystem::path& dir, std::string_view label, 
 	return true;
 }
 
-class LockDir
+class LockFile
 {
 public:
-	explicit LockDir(std::filesystem::path p) : path_(std::move(p))
+	explicit LockFile(std::filesystem::path p) : path_(std::move(p))
 	{
-		std::error_code ec;
-		if (!std::filesystem::create_directory(path_, ec)) {
-			throw std::runtime_error("Lock already exists - daemon already running? " + path_.string());
-		}
-		if (ec) {
-			throw std::runtime_error("Cannot create lock directory: " + path_.string());
+		fd_ = ::open(path_.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+		if (fd_ == -1) {
+			if (errno == EEXIST) {
+				throw std::runtime_error("Lock already exists - daemon already running? " + path_.string());
+			}
+
+			const auto ec = std::error_code(errno, std::generic_category());
+			throw std::runtime_error("Cannot create lock file: " + path_.string() + ": " + ec.message());
 		}
 	}
 
-	~LockDir()
+	~LockFile()
 	{
+		if (fd_ != -1) {
+			::close(fd_);
+		}
+
 		std::error_code ec;
 		std::filesystem::remove(path_, ec);
 	}
 
-	LockDir(const LockDir&) = delete;
-	LockDir& operator=(const LockDir&) = delete;
+	LockFile(const LockFile&) = delete;
+	LockFile& operator=(const LockFile&) = delete;
+	LockFile(LockFile&&) = delete;
+	LockFile& operator=(LockFile&&) = delete;
 
 private:
 	std::filesystem::path path_;
+	int fd_ = -1;
 };
 
 int init_daemon_without_watcher_impl(const std::string& config_dir, const std::vector<std::string>& data_dirs,
-                                     const std::string& log_level, bool apply_flag, ApplyResultLogger& apply_logger)
+                                     const std::string& log_level, bool apply_flag, ApplyResultLogger& apply_logger,
+                                     std::optional<LockFile>* held_lock = nullptr)
 {
 	if (!configure_log_level(log_level)) {
 		return EXIT_FAILURE;
@@ -137,7 +152,6 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 		return EXIT_FAILURE;
 	}
 
-	// Convert all data directories to absolute paths and validate them.
 	std::vector<std::filesystem::path> data_roots;
 	data_roots.reserve(data_dirs.size());
 	for (const auto& dir : data_dirs) {
@@ -154,24 +168,28 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 	}
 
 	const std::filesystem::path db_path = config_root / "deduped.db";
-	const auto lock_path = config_root / "deduped.lockdir";
+	const auto lock_path = config_root / kLockFileName;
 
-	std::optional<LockDir> lock;
+	std::optional<LockFile> local_lock;
+	auto* lock = held_lock != nullptr ? held_lock : &local_lock;
 	try {
-		lock.emplace(lock_path);
+		lock->emplace(lock_path);
 	} catch (const std::exception& ex) {
 		spdlog::error("{}", ex.what());
 		return EXIT_FAILURE;
 	}
 
 	const auto data_str = [&] {
-		std::string s;
+		std::string data;
 		for (size_t i = 0; i < data_roots.size(); ++i) {
-			if (i > 0) s += ", ";
-			s += data_roots[i].string();
+			if (i > 0) {
+				data += ", ";
+			}
+			data += data_roots[i].string();
 		}
-		return s;
+		return data;
 	}();
+
 	spdlog::info("deduped started. config={} data=[{}] db={} apply={}", config_root.string(), data_str,
 	             db_path.string(), apply_flag);
 
@@ -189,7 +207,6 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 	};
 	recover_pending_operations(repo, recovery_cbs);
 
-	// Startup reconciliation scan.
 	spdlog::info("Running startup reconciliation scan...");
 	try {
 		ScanOptions scan_opts;
@@ -208,10 +225,11 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 		spdlog::error("Reconciliation error: {}", ex.what());
 		return EXIT_FAILURE;
 	}
-	spdlog::info("Reconciliation complete. Watching {}...", data_str);
 
+	spdlog::info("Reconciliation complete. Watching {}...", data_str);
 	return EXIT_SUCCESS;
 }
+
 } // namespace
 
 int init_daemon_without_watcher(const std::string& config_dir, const std::vector<std::string>& data_dirs,
@@ -225,15 +243,14 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
                     const std::string& log_level, bool apply_flag)
 {
 	ApplyResultLogger apply_logger;
+	std::optional<LockFile> held_lock;
 
-	// Initialize daemon (validation, recovery, reconciliation)
-	const int init_result =
-	    init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag, apply_logger);
+	const int init_result = init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag,
+	                                                        apply_logger, &held_lock);
 	if (init_result != EXIT_SUCCESS) {
 		return init_result;
 	}
 
-	// Now get the data_roots for watcher setup
 	const std::filesystem::path config_root = std::filesystem::absolute(config_dir);
 	std::vector<std::filesystem::path> data_roots;
 	data_roots.reserve(data_dirs.size());
@@ -241,7 +258,6 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 		data_roots.push_back(std::filesystem::absolute(dir));
 	}
 
-	// inotify watch loop.
 	EngineCallbacks watch_cbs;
 	watch_cbs.on_dupe_found = [](const DupePair& p) {
 		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
@@ -249,12 +265,12 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 	watch_cbs.on_apply = [&](const ApplyResult& r) {
 		apply_logger.log(r, false);
 	};
+
 	EngineOptions watch_engine_opts;
 	watch_engine_opts.dry_run = !apply_flag;
 
 	try {
 		Watcher watcher(data_roots, [&](const WatchEvent& ev) {
-			// Need repo and engine_opts for the callback - recreate them here
 			Repository repo{config_root / "deduped.db"};
 
 			if (ev.type == FileEvent::Modified) {
@@ -278,7 +294,6 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 		auto stop_signal_context = scope_exit{[&] { signal_context.stop(); }};
 
 		watcher.run();
-
 	} catch (const std::exception& ex) {
 		spdlog::error("Watcher error: {}", ex.what());
 		return EXIT_FAILURE;

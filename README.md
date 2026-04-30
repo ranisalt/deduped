@@ -139,7 +139,7 @@ docker run --rm \
 
 ### Docker volumes
 
-- **`/config`**: Persistent named volume containing SQLite database (`deduped.db`) and lock directory
+- **`/config`**: Persistent named volume containing SQLite database (`deduped.db`) and lock file
 - **`/data`**: Bind-mount for target data directory where deduplication occurs
 
 ### User and group mapping (PUID/PGID)
@@ -258,7 +258,7 @@ This is by design for safety. Move files to the same device or use `cp` for cros
 
 ### Database lock
 
-Only one daemon instance can run on a given `/config` directory (enforced via lock directory). If you see:
+Only one daemon instance can run on a given `/config` directory (enforced via lock file). If you see:
 
 ```
 Lock already exists - daemon already running?
@@ -266,7 +266,7 @@ Lock already exists - daemon already running?
 
 Either:
 1. Stop the existing daemon: `docker stop deduped`
-2. Or remove the stale lock: `rm -rf /path/to/config/deduped.lockdir`
+2. Or remove the stale lock: `rm -f /path/to/config/deduped.lock`
 
 ## License
 
