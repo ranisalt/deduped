@@ -43,8 +43,7 @@ public:
 
 	virtual void upsert(const IndexEntry& entry) = 0;
 	[[nodiscard]] virtual std::optional<IndexEntry> find_by_path(const std::string& path) const = 0;
-	[[nodiscard]] virtual std::optional<IndexEntry> find_by_inode(std::uint64_t device,
-	                                                              std::uint64_t inode) const = 0;
+	[[nodiscard]] virtual std::optional<IndexEntry> find_by_inode(std::uint64_t device, std::uint64_t inode) const = 0;
 	[[nodiscard]] virtual std::vector<IndexEntry> find_by_digest(const Digest& digest) const = 0;
 	virtual void remove_stale(std::int64_t cutoff_unix_s) = 0;
 	virtual void remove_by_path(const std::string& path) = 0;

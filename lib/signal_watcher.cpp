@@ -5,8 +5,8 @@
 
 namespace deduped {
 
-SignalWatcher::SignalWatcher(Handler on_signal)
-    : signals_(io_context_, SIGINT, SIGTERM), on_signal_(std::move(on_signal))
+SignalWatcher::SignalWatcher(Handler on_signal) :
+    signals_(io_context_, SIGINT, SIGTERM), on_signal_(std::move(on_signal))
 {
 	signals_.async_wait([this](const boost::system::error_code& ec, int) {
 		if (!ec) {

@@ -36,8 +36,9 @@ std::string read_text(const fs::path& path)
 
 void make_executable(const fs::path& path)
 {
-	fs::permissions(path, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
-	                          fs::perms::others_read | fs::perms::others_exec,
+	fs::permissions(path,
+	                fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read |
+	                    fs::perms::others_exec,
 	                fs::perm_options::replace);
 }
 
@@ -53,26 +54,22 @@ int system_exit_code(const int raw_exit_code)
 }
 
 int run_docker_entrypoint(const TempDir& td, const std::string_view data_roots,
-	                      const std::optional<std::string_view> mode = std::nullopt,
-	                      const std::optional<std::string_view> log_level = std::nullopt)
+                          const std::optional<std::string_view> mode = std::nullopt,
+                          const std::optional<std::string_view> log_level = std::nullopt)
 {
 	const auto fake_bin = td.path() / "fake-bin";
 	fs::create_directories(fake_bin);
-	make_executable(td.write_file(
-	    "fake-bin/deduped",
-	    "#!/usr/bin/env bash\n"
-	    "printf '%s\\n' \"$@\" > \"${DEDUPED_TEST_ARGS_FILE}\"\n"));
-	make_executable(td.write_file(
-	    "fake-bin/sleep",
-	    "#!/usr/bin/env bash\n"
-	    "printf '%s\\n' \"$@\" > \"${DEDUPED_TEST_SLEEP_ARGS_FILE}\"\n"));
+	make_executable(td.write_file("fake-bin/deduped",
+	                              "#!/usr/bin/env bash\n"
+	                              "printf '%s\\n' \"$@\" > \"${DEDUPED_TEST_ARGS_FILE}\"\n"));
+	make_executable(td.write_file("fake-bin/sleep",
+	                              "#!/usr/bin/env bash\n"
+	                              "printf '%s\\n' \"$@\" > \"${DEDUPED_TEST_SLEEP_ARGS_FILE}\"\n"));
 
-	std::string command =
-	    "env PATH=" + shell_quote((fake_bin.string() + ":/usr/bin:/bin")) +
-	    " DEDUPED_TEST_ARGS_FILE=" + shell_quote((td.path() / "deduped-args.txt").string()) +
-	    " DEDUPED_TEST_SLEEP_ARGS_FILE=" + shell_quote((td.path() / "sleep-args.txt").string()) +
-	    " DEDUPED_CONFIG='/config'" +
-	    " DEDUPED_DATA=" + shell_quote(data_roots);
+	std::string command = "env PATH=" + shell_quote((fake_bin.string() + ":/usr/bin:/bin")) +
+	                      " DEDUPED_TEST_ARGS_FILE=" + shell_quote((td.path() / "deduped-args.txt").string()) +
+	                      " DEDUPED_TEST_SLEEP_ARGS_FILE=" + shell_quote((td.path() / "sleep-args.txt").string()) +
+	                      " DEDUPED_CONFIG='/config'" + " DEDUPED_DATA=" + shell_quote(data_roots);
 	if (mode.has_value()) {
 		command += " DEDUPED_MODE=" + shell_quote(*mode);
 	}

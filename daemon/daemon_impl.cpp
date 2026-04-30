@@ -11,8 +11,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <spdlog/spdlog.h>
@@ -203,8 +203,8 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 	ApplyResultLogger apply_logger;
 	std::optional<LockFile> held_lock;
 
-	const int init_result = init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag,
-	                                                        apply_logger, &held_lock);
+	const int init_result =
+	    init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag, apply_logger, &held_lock);
 	if (init_result != EXIT_SUCCESS) {
 		return init_result;
 	}

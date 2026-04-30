@@ -3,8 +3,8 @@
 #include <array>
 #include <cstring>
 #include <format>
-#include <sqlite3.h>
 #include <span>
+#include <sqlite3.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -352,9 +352,10 @@ std::optional<IndexEntry> Repository::find_by_inode(std::uint64_t device, std::u
 
 std::vector<IndexEntry> Repository::find_by_digest(const Digest& digest) const
 {
-	const auto sql = std::format("SELECT {} FROM inodes i JOIN paths p ON p.inode_id=i.id WHERE i.digest=? "
-	                             "ORDER BY p.path;",
-	                             kEntrySelectCols);
+	const auto sql = std::format(
+	    "SELECT {} FROM inodes i JOIN paths p ON p.inode_id=i.id WHERE i.digest=? "
+	    "ORDER BY p.path;",
+	    kEntrySelectCols);
 	auto st = impl_->prepare(sql, "find_by_digest");
 	st.bind_blob(1, digest);
 
@@ -371,9 +372,9 @@ void Repository::remove_stale(std::int64_t cutoff_unix_s)
 		auto stale_paths = impl_->prepare("DELETE FROM paths WHERE last_seen < ?;", "remove_stale_paths");
 		stale_paths.bind(1, cutoff_unix_s).exec();
 
-		auto prune_orphans = impl_->prepare(
-		    "DELETE FROM inodes WHERE NOT EXISTS(SELECT 1 FROM paths WHERE paths.inode_id=inodes.id);",
-		    "prune_orphan_inodes");
+		auto prune_orphans =
+		    impl_->prepare("DELETE FROM inodes WHERE NOT EXISTS(SELECT 1 FROM paths WHERE paths.inode_id=inodes.id);",
+		                   "prune_orphan_inodes");
 		prune_orphans.exec();
 	});
 }
@@ -394,8 +395,8 @@ void Repository::remove_by_path(const std::string& path)
 std::int64_t Repository::log_op_planned(const std::string& canonical, const std::string& duplicate,
                                         const std::string& backup_path)
 {
-	auto st = impl_->prepare(
-	    "INSERT INTO op_log(canonical, duplicate, backup_path, status) VALUES(?,?,?,'planned');", "log_op_planned");
+	auto st = impl_->prepare("INSERT INTO op_log(canonical, duplicate, backup_path, status) VALUES(?,?,?,'planned');",
+	                         "log_op_planned");
 	st.bind(1, canonical).bind(2, duplicate).bind(3, backup_path).exec();
 	return sqlite3_last_insert_rowid(impl_->db);
 }

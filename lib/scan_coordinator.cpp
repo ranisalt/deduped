@@ -15,10 +15,7 @@ namespace deduped::detail {
 
 namespace {
 
-unsigned int worker_count()
-{
-	return std::max(1u, std::thread::hardware_concurrency());
-}
+unsigned int worker_count() { return std::max(1u, std::thread::hardware_concurrency()); }
 
 } // namespace
 
