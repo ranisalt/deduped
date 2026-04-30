@@ -57,11 +57,12 @@ deduped --config /config /data
 deduped --config /config /data /another
 ```
 
-In containers, the daemon automatically applies deduplication. To run in report-only mode, override the entrypoint or run the binary without `--apply`.
+In containers, the daemon defaults to apply mode. Set `DEDUPED_MODE=dry-run` to watch/report without creating hardlinks.
 
 Environment variables (must be provided at runtime via docker-compose or docker run):
 - `DEDUPED_CONFIG`: Directory for SQLite database (e.g., `/config`)
 - `DEDUPED_DATA`: For the container entrypoint, one or more root directories passed as a comma-delimited list (e.g., `/data` or `/data,/another`). The entrypoint expands this into one CLI positional argument per root. Root paths cannot contain commas.
+- `DEDUPED_MODE`: Container daemon mode: `apply` (default) or `dry-run`
 - `PUID`: User ID for daemon process (for host permission mapping)
 - `PGID`: Group ID for daemon process (for host permission mapping)
 - `TZ`: Timezone (optional, default: `Etc/UTC`)
@@ -93,6 +94,20 @@ docker run -d \
   -e PGID=1000 \
   -e DEDUPED_CONFIG=/config \
   -e DEDUPED_DATA=/data \
+  -e DEDUPED_MODE=apply \
+  -v deduped-config:/config \
+  -v /path/to/your/data:/data \
+  --restart unless-stopped \
+  deduped:latest
+
+# Run daemon in report-only mode
+docker run -d \
+  --name deduped-dry-run \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e DEDUPED_CONFIG=/config \
+  -e DEDUPED_DATA=/data \
+  -e DEDUPED_MODE=dry-run \
   -v deduped-config:/config \
   -v /path/to/your/data:/data \
   --restart unless-stopped \
@@ -105,6 +120,7 @@ docker run -d \
   -e PGID=1000 \
   -e DEDUPED_CONFIG=/config \
   -e DEDUPED_DATA=/data,/another \
+  -e DEDUPED_MODE=apply \
   -v deduped-config:/config \
   -v /path/to/your/data:/data \
   -v /path/to/another:/another \
@@ -149,7 +165,7 @@ docker run -e PUID=1000 -e PGID=1000 ...
 
 - Symlinks are detected and never replaced with hardlinks
 - Files on different filesystems are never hardlinked
-- CLI requires explicit `--apply` flag; default is report-only (daemon in container applies by default)
+- CLI requires explicit `--apply` flag; default is report-only (container daemon defaults to `DEDUPED_MODE=apply`)
 - Hardlinking requires files on the same device and passage of all pre-flight checks
 
 ### Pre-flight checks
@@ -177,6 +193,7 @@ Environment variables must be provided at runtime. The image has no built-in def
 |----------|-------------|
 | `DEDUPED_CONFIG` | **(Required)** Directory for SQLite database (e.g., `/config`) |
 | `DEDUPED_DATA` | **(Required)** One or more root directories, comma-delimited for the container entrypoint (e.g., `/data` or `/data,/another`). The entrypoint expands this into one CLI positional argument per root. Root paths themselves cannot contain commas. |
+| `DEDUPED_MODE` | *(Optional)* Container daemon mode: `apply` (default) or `dry-run` |
 | `PUID` | **(Required for Docker)** User ID for process execution (match your host user ID) |
 | `PGID` | **(Required for Docker)** Group ID for process execution (match your host group ID) |
 | `TZ` | *(Optional)* Timezone (default: `Etc/UTC`) |

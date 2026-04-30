@@ -63,6 +63,8 @@ using InodeDigestCache = boost::unordered_flat_map<InodeKey, Digest, InodeKeyHas
 using InFlightInodes = boost::unordered_flat_set<InodeKey, InodeKeyHash>;
 using DeferredSameInodeMap = boost::unordered_flat_map<InodeKey, DeferredHashJobs, InodeKeyHash>;
 
+constexpr std::string_view kDuplicatePathNotWritableMessage = "duplicate path not writable, skipped";
+
 ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldAbortFn& should_abort);
 
 template <typename AbortFn>
@@ -370,6 +372,20 @@ ApplyResult apply_pair(Repository& repo, const DupePair& pair, const HashShouldA
 		throw ScanInterrupted{};
 	} catch (const ScanInterrupted&) {
 		throw;
+	} catch (const std::system_error& ex) {
+		if (op_id.has_value() &&
+		    (ex.code() == std::errc::permission_denied || ex.code() == std::errc::operation_not_permitted)) {
+			repo.log_op_complete(*op_id, Repository::OpStatus::Failed, kDuplicatePathNotWritableMessage.data());
+			result.status = ApplyStatus::Skipped;
+			result.message = kDuplicatePathNotWritableMessage;
+			return result;
+		}
+
+		if (op_id.has_value()) {
+			repo.log_op_complete(*op_id, Repository::OpStatus::Failed, ex.what());
+		}
+		result.status = ApplyStatus::Failed;
+		result.message = ex.what();
 	} catch (const std::exception& ex) {
 		if (op_id.has_value()) {
 			repo.log_op_complete(*op_id, Repository::OpStatus::Failed, ex.what());

@@ -19,10 +19,42 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 
 namespace deduped {
 
 namespace {
+
+constexpr std::string_view kDuplicatePathNotWritableMessage = "duplicate path not writable, skipped";
+
+class ApplyResultLogger
+{
+public:
+	void log(const ApplyResult& result, const bool reconciliation)
+	{
+		const auto linked_prefix = reconciliation ? "RECONCILE LINKED" : "LINKED";
+		const auto failed_prefix = reconciliation ? "RECONCILE FAILED" : "FAILED";
+		const auto skipped_prefix = reconciliation ? "RECONCILE SKIPPED" : "SKIPPED";
+
+		if (result.status == ApplyStatus::Linked) {
+			spdlog::info("{} {}", linked_prefix, result.pair.duplicate_path);
+			return;
+		}
+
+		if (result.status == ApplyStatus::Failed) {
+			spdlog::error("{} {}: {}", failed_prefix, result.pair.duplicate_path, result.message);
+			return;
+		}
+
+		if (result.status == ApplyStatus::Skipped && result.message == kDuplicatePathNotWritableMessage &&
+		    unwritable_duplicate_paths_logged_.insert(result.pair.duplicate_path).second) {
+			spdlog::warn("{} {}: {}", skipped_prefix, result.pair.duplicate_path, result.message);
+		}
+	}
+
+private:
+	std::unordered_set<std::string> unwritable_duplicate_paths_logged_;
+};
 
 bool check_dir_access(const std::filesystem::path& dir, std::string_view label, const bool require_write)
 {
@@ -92,10 +124,8 @@ private:
 	std::filesystem::path path_;
 };
 
-} // namespace
-
-int init_daemon_without_watcher(const std::string& config_dir, const std::vector<std::string>& data_dirs,
-                                const std::string& log_level, bool apply_flag)
+int init_daemon_without_watcher_impl(const std::string& config_dir, const std::vector<std::string>& data_dirs,
+                                     const std::string& log_level, bool apply_flag, ApplyResultLogger& apply_logger)
 {
 	if (!configure_log_level(log_level)) {
 		return EXIT_FAILURE;
@@ -107,12 +137,12 @@ int init_daemon_without_watcher(const std::string& config_dir, const std::vector
 		return EXIT_FAILURE;
 	}
 
-	// Convert all data directories to absolute paths and validate them
+	// Convert all data directories to absolute paths and validate them.
 	std::vector<std::filesystem::path> data_roots;
 	data_roots.reserve(data_dirs.size());
 	for (const auto& dir : data_dirs) {
 		const auto abs_dir = std::filesystem::absolute(dir);
-		if (!check_dir_access(abs_dir, "Data", apply_flag)) {
+		if (!check_dir_access(abs_dir, "Data", false)) {
 			return EXIT_FAILURE;
 		}
 		data_roots.push_back(abs_dir);
@@ -169,11 +199,8 @@ int init_daemon_without_watcher(const std::string& config_dir, const std::vector
 		cbs.on_dupe_found = [](const DupePair& p) {
 			spdlog::info("RECONCILE DUPE  {} == {}", p.canonical_path, p.duplicate_path);
 		};
-		cbs.on_apply = [](const ApplyResult& r) {
-			if (r.status == ApplyStatus::Linked)
-				spdlog::info("RECONCILE LINKED {}", r.pair.duplicate_path);
-			else if (r.status == ApplyStatus::Failed)
-				spdlog::error("RECONCILE FAILED {}: {}", r.pair.duplicate_path, r.message);
+		cbs.on_apply = [&](const ApplyResult& r) {
+			apply_logger.log(r, true);
 		};
 
 		run_engine(repo, scan_opts, engine_opts, cbs);
@@ -185,12 +212,23 @@ int init_daemon_without_watcher(const std::string& config_dir, const std::vector
 
 	return EXIT_SUCCESS;
 }
+} // namespace
+
+int init_daemon_without_watcher(const std::string& config_dir, const std::vector<std::string>& data_dirs,
+                                const std::string& log_level, bool apply_flag)
+{
+	ApplyResultLogger apply_logger;
+	return init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag, apply_logger);
+}
 
 int run_daemon_impl(const std::string& config_dir, const std::vector<std::string>& data_dirs,
                     const std::string& log_level, bool apply_flag)
 {
+	ApplyResultLogger apply_logger;
+
 	// Initialize daemon (validation, recovery, reconciliation)
-	const int init_result = init_daemon_without_watcher(config_dir, data_dirs, log_level, apply_flag);
+	const int init_result =
+	    init_daemon_without_watcher_impl(config_dir, data_dirs, log_level, apply_flag, apply_logger);
 	if (init_result != EXIT_SUCCESS) {
 		return init_result;
 	}
@@ -208,11 +246,8 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 	watch_cbs.on_dupe_found = [](const DupePair& p) {
 		spdlog::info("DUPE  {} == {}", p.canonical_path, p.duplicate_path);
 	};
-	watch_cbs.on_apply = [](const ApplyResult& r) {
-		if (r.status == ApplyStatus::Linked)
-			spdlog::info("LINKED {}", r.pair.duplicate_path);
-		else if (r.status == ApplyStatus::Failed)
-			spdlog::error("FAILED {}: {}", r.pair.duplicate_path, r.message);
+	watch_cbs.on_apply = [&](const ApplyResult& r) {
+		apply_logger.log(r, false);
 	};
 	EngineOptions watch_engine_opts;
 	watch_engine_opts.dry_run = !apply_flag;

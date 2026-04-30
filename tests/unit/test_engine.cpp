@@ -237,8 +237,8 @@ TEST_F(EngineTest, InterruptedDryRunPersistsPartialIndex)
 	std::vector<fs::path> file_paths;
 	file_paths.reserve(job_count);
 	for (unsigned int i = 0; i < job_count; ++i) {
-		file_paths.push_back(
-		    td.write_file("file-" + std::to_string(i) + ".bin", std::string(1024 * 1024, static_cast<char>('a' + (i % 26)))));
+		file_paths.push_back(td.write_file("file-" + std::to_string(i) + ".bin",
+		                                   std::string(1024 * 1024, static_cast<char>('a' + (i % 26)))));
 	}
 
 	EngineOptions opts;

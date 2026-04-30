@@ -34,6 +34,21 @@ void skip_if_running_as_root_for_binary_tests()
 	}
 }
 
+std::size_t count_substring(std::string_view haystack, const std::string_view needle)
+{
+	if (needle.empty()) {
+		return 0;
+	}
+
+	std::size_t count = 0;
+	std::size_t pos = 0;
+	while ((pos = haystack.find(needle, pos)) != std::string_view::npos) {
+		++count;
+		pos += needle.size();
+	}
+	return count;
+}
+
 } // namespace
 
 TEST(CliBinaryTest, InterruptLogsClosingMessageWithPendingHashJobs)
@@ -306,6 +321,46 @@ TEST(DaemonInitTest, WithApplyFlagExecutesRecoveryAndReconciliation)
 	EXPECT_EQ(meta_from_path(p1).inode, meta_from_path(p2).inode);
 }
 
+TEST(DaemonInitTest, ApplyModeAllowsUnwritableDataDirectory)
+{
+	skip_if_running_as_root_for_binary_tests();
+
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+	const auto canonical = td.write_file("root/a.txt", "same content");
+	const auto duplicate = td.write_file("root/b.txt", "same content");
+
+	std::ostringstream captured_logs;
+	auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured_logs);
+	auto logger = std::make_shared<spdlog::logger>("test-daemon-unwritable-root", sink);
+	auto previous_logger = spdlog::default_logger();
+	const auto previous_level = spdlog::default_logger()->level();
+	spdlog::set_default_logger(logger);
+	spdlog::set_level(spdlog::level::info);
+
+	const auto restore_logger = scope_exit{[&] {
+		spdlog::set_default_logger(previous_logger);
+		spdlog::set_level(previous_level);
+	}};
+
+	const auto restore_permissions = scope_exit{[root] {
+		std::error_code ec;
+		fs::permissions(root, fs::perms::owner_all, fs::perm_options::replace, ec);
+	}};
+	fs::permissions(root, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+
+	const int exit_code = init_daemon_without_watcher(config.string(), {root.string()}, "info", true);
+
+	EXPECT_EQ(exit_code, 0);
+	EXPECT_NE(meta_from_path(canonical).inode, meta_from_path(duplicate).inode);
+	const auto logs = captured_logs.str();
+	EXPECT_EQ(logs.find("directory is not writable"), std::string::npos);
+	EXPECT_NE(logs.find("duplicate path not writable, skipped"), std::string::npos);
+}
+
 TEST(DaemonInitTest, HandlesMultipleDataDirectories)
 {
 	TempDir td;
@@ -532,6 +587,88 @@ TEST(DaemonBinaryTest, DryRunWatchModeDoesNotApplyHardlinks)
 
 	EXPECT_NE(meta_from_path(canonical).inode, meta_from_path(duplicate).inode);
 
+	::raise(SIGINT);
+	daemon_thread.join();
+	EXPECT_EQ(exit_code, EXIT_SUCCESS);
+}
+
+TEST(DaemonBinaryTest, ApplyModeLogsUnwritableDuplicateOnlyOnce)
+{
+	skip_if_running_as_root_for_binary_tests();
+
+	TempDir td;
+	const auto config = td.path() / "config";
+	fs::create_directories(config);
+	const auto root = td.path() / "root";
+	fs::create_directories(root);
+
+	const auto canonical = td.write_file("root/a.txt", "same content");
+	const auto duplicate = td.write_file("root/b.txt", "different content");
+
+	std::ostringstream captured_logs;
+	auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured_logs);
+	auto logger = std::make_shared<spdlog::logger>("test-daemon-log-once", sink);
+	auto previous_logger = spdlog::default_logger();
+	const auto previous_level = spdlog::default_logger()->level();
+	spdlog::set_default_logger(logger);
+	spdlog::set_level(spdlog::level::info);
+
+	const auto restore_logger = scope_exit{[&] {
+		spdlog::set_default_logger(previous_logger);
+		spdlog::set_level(previous_level);
+	}};
+
+	const auto restore_permissions = scope_exit{[root] {
+		std::error_code ec;
+		fs::permissions(root, fs::perms::owner_all, fs::perm_options::replace, ec);
+	}};
+
+	Repository observer(config / "deduped.db");
+	int exit_code = EXIT_FAILURE;
+	std::jthread daemon_thread([&] { exit_code = run_daemon_impl(config.string(), {root.string()}, "info", true); });
+	const auto stop_daemon = scope_exit{[&] {
+		if (daemon_thread.joinable()) {
+			::raise(SIGINT);
+			daemon_thread.join();
+		}
+	}};
+
+	auto wait_for = [](auto&& ready) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (std::chrono::steady_clock::now() < deadline) {
+			if (ready()) {
+				return true;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	};
+
+	ASSERT_TRUE(wait_for([&] {
+		return observer.find_by_path(canonical.string()).has_value() &&
+		       observer.find_by_path(duplicate.string()).has_value();
+	}));
+
+	fs::permissions(root, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+	{
+		std::ofstream out(duplicate, std::ios::trunc);
+		out << "same content";
+	}
+	ASSERT_TRUE(wait_for([&] {
+		return count_substring(captured_logs.str(), "DUPE  " + canonical.string() + " == " + duplicate.string()) >= 1 &&
+		       count_substring(captured_logs.str(), "duplicate path not writable, skipped") >= 1;
+	}));
+
+	{
+		std::ofstream out(duplicate, std::ios::trunc);
+		out << "same content";
+	}
+	ASSERT_TRUE(wait_for([&] {
+		return count_substring(captured_logs.str(), "DUPE  " + canonical.string() + " == " + duplicate.string()) >= 2;
+	}));
+
+	EXPECT_EQ(count_substring(captured_logs.str(), "duplicate path not writable, skipped"), 1u);
+	EXPECT_NE(meta_from_path(canonical).inode, meta_from_path(duplicate).inode);
 	::raise(SIGINT);
 	daemon_thread.join();
 	EXPECT_EQ(exit_code, EXIT_SUCCESS);

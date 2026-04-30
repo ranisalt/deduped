@@ -21,7 +21,20 @@ if [[ "${#DATA_ROOT_ARGS[@]}" -eq 0 ]]; then
     exec sleep infinity
 fi
 
-DEDUPED_ARGS=(--config "${DEDUPED_CONFIG}" --apply)
+DEDUPED_MODE="${DEDUPED_MODE:-apply}"
+case "${DEDUPED_MODE}" in
+    apply)
+        DEDUPED_ARGS=(--config "${DEDUPED_CONFIG}" --apply)
+        ;;
+    dry-run)
+        DEDUPED_ARGS=(--config "${DEDUPED_CONFIG}")
+        ;;
+    *)
+        echo "[svc-deduped] DEDUPED_MODE must be 'apply' or 'dry-run'. Sleeping."
+        exec sleep infinity
+        ;;
+esac
+
 if [[ -n "${LOG_LEVEL}" ]]; then
     DEDUPED_ARGS+=(--log-level "${LOG_LEVEL}")
 fi

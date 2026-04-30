@@ -26,6 +26,7 @@ add_executable(integration_tests
     integration/test_scan_and_dedupe.cpp
     integration/test_apply_hardlink.cpp
     integration/test_binaries.cpp
+    integration/test_docker_entrypoint.cpp
     integration/test_crash_recovery.cpp
     integration/test_scanner.cpp
     integration/test_watcher.cpp

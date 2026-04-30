@@ -11,7 +11,9 @@ services:
       - UMASK=022
       - DEDUPED_CONFIG=/config
       - DEDUPED_DATA=/data
+      - DEDUPED_MODE=apply
       # Multiple roots: 'DEDUPED_DATA=/data,/another' and add a matching /another mount below
+      # Set DEDUPED_MODE=dry-run to watch/report without creating hardlinks
       - LOG_LEVEL=info
     volumes:
       - ./config:/config
