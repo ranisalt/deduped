@@ -12,6 +12,10 @@ namespace deduped {
 // string is non-empty but not a recognised spdlog level name.
 [[nodiscard]] inline bool configure_log_level(std::string_view log_level_arg)
 {
+	// Flush every info-or-above record so that long-running services do not
+	// lose context if they exit abruptly (silent crashes, signals).
+	spdlog::flush_on(spdlog::level::info);
+
 	if (log_level_arg.empty()) {
 		return true;
 	}

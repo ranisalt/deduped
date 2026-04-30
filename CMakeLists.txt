@@ -27,6 +27,7 @@ option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage flags" OFF)
 option(ENABLE_UNITY_BUILD "Enable CMake Unity (jumbo) builds" OFF)
 option(ENABLE_LTO "Enable link-time optimization (IPO/LTO)" OFF)
+option(USE_SYSTEM_SQLITE3 "Link against system sqlite3 instead of the vcpkg-bundled copy" OFF)
 include(CTest)
 
 if(ENABLE_LTO)

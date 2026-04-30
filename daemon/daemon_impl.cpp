@@ -157,7 +157,15 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 	    .engine_opts = {.dry_run = !apply_flag},
 	}};
 
-	session.recover();
+	try {
+		session.recover();
+	} catch (const std::exception& ex) {
+		spdlog::error("Recovery error: {}", ex.what());
+		return EXIT_FAILURE;
+	} catch (...) {
+		spdlog::critical("Recovery aborted by unknown exception");
+		return EXIT_FAILURE;
+	}
 
 	spdlog::info("Running startup reconciliation scan...");
 	try {
@@ -170,6 +178,9 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 		session.run_full_scan(cbs);
 	} catch (const std::exception& ex) {
 		spdlog::error("Reconciliation error: {}", ex.what());
+		return EXIT_FAILURE;
+	} catch (...) {
+		spdlog::critical("Reconciliation aborted by unknown exception");
 		return EXIT_FAILURE;
 	}
 
@@ -236,6 +247,9 @@ int run_daemon_impl(const std::string& config_dir, const std::vector<std::string
 		watcher.run();
 	} catch (const std::exception& ex) {
 		spdlog::error("Watcher error: {}", ex.what());
+		return EXIT_FAILURE;
+	} catch (...) {
+		spdlog::critical("Watcher aborted by unknown exception");
 		return EXIT_FAILURE;
 	}
 

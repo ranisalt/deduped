@@ -1,6 +1,9 @@
 #include "daemon_impl.hpp"
 
 #include <CLI/CLI.hpp>
+#include <cstdlib>
+#include <exception>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <vector>
 
@@ -23,5 +26,15 @@ int main(int argc, char** argv)
 
 	CLI11_PARSE(app, argc, argv);
 
-	return deduped::run_daemon_impl(config_dir, data_dirs, log_level_arg, apply_flag);
+	try {
+		return deduped::run_daemon_impl(config_dir, data_dirs, log_level_arg, apply_flag);
+	} catch (const std::exception& ex) {
+		spdlog::critical("Fatal: {}", ex.what());
+		spdlog::default_logger()->flush();
+		return EXIT_FAILURE;
+	} catch (...) {
+		spdlog::critical("Fatal: aborted by unknown exception");
+		spdlog::default_logger()->flush();
+		return EXIT_FAILURE;
+	}
 }

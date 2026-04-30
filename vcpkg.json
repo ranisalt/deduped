@@ -2,19 +2,39 @@
   "name": "deduped",
   "version": "0.1.0",
   "dependencies": [
-    "blake3",
     "boost-asio",
     "boost-container",
     "boost-container-hash",
     "boost-unordered",
-    "cli11",
-    {
-      "name": "spdlog",
-      "default-features": false
-    },
-    "sqlite3"
+    "cli11"
+  ],
+  "default-features": [
+    "bundled-blake3",
+    "bundled-spdlog",
+    "bundled-sqlite3"
   ],
   "features": {
+    "bundled-blake3": {
+      "description": "Bundle BLAKE3 via vcpkg (disable to link against system blake3).",
+      "dependencies": [
+        "blake3"
+      ]
+    },
+    "bundled-spdlog": {
+      "description": "Bundle spdlog via vcpkg (disable to link against system spdlog).",
+      "dependencies": [
+        {
+          "name": "spdlog",
+          "default-features": false
+        }
+      ]
+    },
+    "bundled-sqlite3": {
+      "description": "Bundle SQLite3 via vcpkg (disable to link against system sqlite3).",
+      "dependencies": [
+        "sqlite3"
+      ]
+    },
     "tests": {
       "description": "Dependencies needed only when BUILD_TESTING is enabled.",
       "dependencies": [
