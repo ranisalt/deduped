@@ -12,10 +12,7 @@
       "name": "spdlog",
       "default-features": false
     },
-    {
-      "name": "sqlite3",
-      "default-features": false
-    }
+    "sqlite3"
   ],
   "features": {
     "tests": {

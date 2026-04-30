@@ -14,13 +14,13 @@ add_library(deduped_lib STATIC
 
 find_package(Boost REQUIRED COMPONENTS asio container unordered)
 find_package(BLAKE3 CONFIG REQUIRED)
-find_package(SQLite3 REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 target_link_libraries(deduped_lib
     PUBLIC
         BLAKE3::blake3
-        SQLite3::SQLite3
+        unofficial::sqlite3::sqlite3
         spdlog::spdlog
         Boost::asio
     PRIVATE
