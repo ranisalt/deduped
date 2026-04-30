@@ -1,6 +1,7 @@
 add_library(deduped_lib STATIC
     types.cpp
     hasher.cpp
+    fs_walk.cpp
     scanner.cpp
     repository.cpp
     engine.cpp

@@ -140,16 +140,13 @@ int init_daemon_without_watcher_impl(const std::string& config_dir, const std::v
 		return EXIT_FAILURE;
 	}
 
-	const auto data_str = [&] {
-		std::string data;
-		for (size_t i = 0; i < data_roots.size(); ++i) {
-			if (i > 0) {
-				data += ", ";
-			}
-			data += data_roots[i].string();
+	std::string data_str;
+	for (const auto& root : data_roots) {
+		if (!data_str.empty()) {
+			data_str += ", ";
 		}
-		return data;
-	}();
+		data_str += root.string();
+	}
 
 	spdlog::info("deduped started. config={} data=[{}] db={} apply={}", config_root.string(), data_str,
 	             db_path.string(), apply_flag);

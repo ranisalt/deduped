@@ -1,5 +1,7 @@
 #include "watcher.hpp"
 
+#include "fs_walk.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <boost/asio/error.hpp>
@@ -66,9 +68,10 @@ struct Watcher::Impl
 	void add_watch_recursive(const std::filesystem::path& dir, const bool required_root)
 	{
 		namespace fs = std::filesystem;
-		std::error_code ec;
+
 		if (required_root) {
-			fs::directory_iterator root_probe{dir, ec};
+			std::error_code ec;
+			fs::directory_iterator probe{dir, ec};
 			if (ec) {
 				throw fs::filesystem_error("watch root is unreadable", dir, ec);
 			}
@@ -76,35 +79,16 @@ struct Watcher::Impl
 
 		add_watch(dir, required_root);
 
-		fs::recursive_directory_iterator it{dir, fs::directory_options::skip_permission_denied, ec};
-		if (ec) {
-			if (required_root) {
-				throw fs::filesystem_error("watch root is unreadable", dir, ec);
-			}
-			spdlog::warn("Ignoring unreadable subtree while watching {}: {}", dir.string(), ec.message());
-			return;
-		}
-
-		const auto end = fs::recursive_directory_iterator{};
-		while (it != end) {
-			const auto entry = *it;
-			std::error_code entry_ec;
-			const bool is_symlink = entry.is_symlink(entry_ec);
-			if (!entry_ec && is_symlink) {
-				if (entry.is_directory(entry_ec) && !entry_ec) {
-					it.disable_recursion_pending();
+		try {
+			for_each_descendant(dir, [&](const fs::directory_entry& entry) {
+				std::error_code ec;
+				if (entry.is_directory(ec) && !ec) {
+					add_watch(entry.path(), false);
 				}
-			} else if (!entry_ec && entry.is_directory(entry_ec) && !entry_ec) {
-				add_watch(entry.path(), false);
-			} else if (entry_ec) {
-				spdlog::warn("Ignoring unreadable subtree while watching {}: {}", entry.path().string(),
-				             entry_ec.message());
-			}
-
-			it.increment(ec);
-			if (ec) {
-				spdlog::warn("Ignoring unreadable subtree while watching {}: {}", entry.path().string(), ec.message());
-				ec.clear();
+			});
+		} catch (const fs::filesystem_error&) {
+			if (required_root) {
+				throw;
 			}
 		}
 	}

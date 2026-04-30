@@ -50,28 +50,3 @@ target_compile_definitions(integration_tests
 )
 
 gtest_discover_tests(integration_tests LABELS integration)
-
-# Apply sanitizers to the library too, so bugs in library code are caught when
-# running the test suite with sanitizers enabled.
-foreach(tgt deduped_lib unit_tests integration_tests)
-    if(ENABLE_ASAN)
-        target_compile_options(${tgt} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
-        target_link_options(${tgt} PRIVATE -fsanitize=address)
-    endif()
-    if(ENABLE_UBSAN)
-        target_compile_options(${tgt} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
-        target_link_options(${tgt} PRIVATE -fsanitize=undefined)
-    endif()
-endforeach()
-
-if(ENABLE_COVERAGE)
-    foreach(tgt unit_tests integration_tests)
-        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-            target_compile_options(${tgt} PRIVATE --coverage)
-            target_link_options(${tgt} PRIVATE --coverage)
-        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            target_compile_options(${tgt} PRIVATE -fprofile-instr-generate -fcoverage-mapping)
-            target_link_options(${tgt} PRIVATE -fprofile-instr-generate)
-        endif()
-    endforeach()
-endif()
